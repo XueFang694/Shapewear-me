@@ -1273,17 +1273,13 @@ et exporte un rapport Excel/PDF exploitable.
 **Objectif** : Intelligence et automatisation avancées.
 
 Livrables :
-- [ ] Fallback LLM pour la classification (via API Anthropic)
 - [ ] Wizard de création de connecteur dans l'UI
-- [ ] Système d'alertes configurables (email, notification desktop)
 - [ ] Planification automatique des sessions (`scheduler.py`)
 - [ ] Support des proxies rotatifs
 - [ ] Vue d'audit de classification (produits mal classifiés)
 - [ ] Graphiques d'évolution des prix dans le détail produit
 - [ ] Archivage automatique des données anciennes
-- [ ] Extension vers d'autres secteurs (lingerie, activewear, swimwear)
 - [ ] API REST locale optionnelle (FastAPI, pour intégrations externes)
-- [ ] Mode cloud optionnel (PostgreSQL + interface web)
 - [ ] Guide de contribution pour nouveaux connecteurs
 
 ---
