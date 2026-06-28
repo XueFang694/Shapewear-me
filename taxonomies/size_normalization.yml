@@ -1,0 +1,84 @@
+# Normalisation des tailles brutes → taille canonique
+# Utilisée par app/processing/normalizer.py
+# Structure : raw_size_uppercase: canonical_size
+
+mappings:
+  # --- Tailles standard ---
+  "XXS":    "XXS"
+  "XS":     "XS"
+  "S":      "S"
+  "SMALL":  "S"
+  "M":      "M"
+  "MEDIUM": "M"
+  "L":      "L"
+  "LARGE":  "L"
+  "XL":     "XL"
+  "XXL":    "XXL"
+  "2XL":    "XXL"
+  "XXXL":   "3XL"
+  "3XL":    "3XL"
+  "4XL":    "4XL"
+  "5XL":    "5XL"
+
+  # --- Tailles numériques US (vêtements) ---
+  "0":  "XS"
+  "2":  "XS"
+  "4":  "S"
+  "6":  "S"
+  "8":  "M"
+  "10": "M"
+  "12": "L"
+  "14": "L"
+  "16": "XL"
+  "18": "XL"
+  "20": "XXL"
+  "22": "XXL"
+  "24": "3XL"
+
+  # --- Tailles plus (avec slash) ---
+  "1X":  "1X"
+  "2X":  "2X"
+  "3X":  "3X"
+  "4X":  "4X"
+
+  # --- Tailles bonnet ---
+  "30A":  "30A"
+  "30B":  "30B"
+  "30C":  "30C"
+  "30D":  "30D"
+  "32A":  "32A"
+  "32B":  "32B"
+  "32C":  "32C"
+  "32D":  "32D"
+  "32DD": "32DD"
+  "34A":  "34A"
+  "34B":  "34B"
+  "34C":  "34C"
+  "34D":  "34D"
+  "34DD": "34DD"
+  "36A":  "36A"
+  "36B":  "36B"
+  "36C":  "36C"
+  "36D":  "36D"
+  "36DD": "36DD"
+  "38B":  "38B"
+  "38C":  "38C"
+  "38D":  "38D"
+  "38DD": "38DD"
+  "40B":  "40B"
+  "40C":  "40C"
+  "40D":  "40D"
+  "42B":  "42B"
+  "42C":  "42C"
+  "42D":  "42D"
+
+  # --- Tailles culotte / bas ---
+  "ONE SIZE":    "One Size"
+  "ONE-SIZE":    "One Size"
+  "ONESIZE":     "One Size"
+  "OS":          "One Size"
+
+  # --- Tailles maternité ---
+  "MATERNITY S": "S (Maternité)"
+  "MATERNITY M": "M (Maternité)"
+  "MATERNITY L": "L (Maternité)"

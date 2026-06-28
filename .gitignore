@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Application data
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/logs/
+data/exports/
+
+# Environnement
+.env
+settings.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Alembic
+app/storage/migrations/versions/
+
+# Distribution
+*.tar.gz
+*.whl

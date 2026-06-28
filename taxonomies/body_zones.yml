@@ -1,0 +1,76 @@
+# Taxonomie des zones corporelles ciblées
+# Utilisée par app/processing/classifier.py
+
+zones:
+
+  waist:
+    label: "Taille"
+    keywords:
+      - waist
+      - waistline
+      - cinches waist
+      - waist slimming
+
+  stomach:
+    label: "Ventre"
+    keywords:
+      - tummy
+      - stomach
+      - belly
+      - abdomen
+      - core
+      - midsection
+      - tummy control
+      - smooths
+
+  hips:
+    label: "Hanches"
+    keywords:
+      - hips
+      - hip
+      - hipline
+      - hip slimming
+
+  thighs:
+    label: "Cuisses"
+    keywords:
+      - thigh
+      - thighs
+      - inner thigh
+      - thigh slimming
+
+  back:
+    label: "Dos"
+    keywords:
+      - back
+      - back fat
+      - bra bulge
+      - back smoothing
+      - back support
+
+  chest:
+    label: "Poitrine"
+    keywords:
+      - bust
+      - chest
+      - breasts
+      - cleavage
+      - décolleté
+
+  buttocks:
+    label: "Fesses"
+    keywords:
+      - butt
+      - buttocks
+      - rear
+      - booty lift
+      - bottom
+      - seat
+
+  full_body:
+    label: "Corps entier"
+    keywords:
+      - full body
+      - all over
+      - head to toe
+      - total body

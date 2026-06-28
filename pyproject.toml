@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-intel"
+version = "0.1.0"
+description = "Plateforme de veille concurrentielle — marché shapewear US"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "jmespath>=1.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "pydantic-settings>=2.0",
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",
+    "openpyxl>=3.1",
+    "weasyprint>=62",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "respx>=0.21",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+market-intel = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true

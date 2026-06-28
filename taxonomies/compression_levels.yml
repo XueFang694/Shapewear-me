@@ -1,0 +1,47 @@
+# Taxonomie des niveaux de compression normalisés
+# Utilisée par app/processing/classifier.py
+
+levels:
+
+  extra_firm:
+    label: "Extra-forte"
+    keywords:
+      - extra firm
+      - maximum
+      - extreme
+      - surgical
+      - ultra firm
+      - extra-firm
+
+  firm:
+    label: "Forte"
+    keywords:
+      - firm
+      - strong
+      - tummy control
+      - maximum control
+      - high compression
+      - power
+      - sculpt
+      - sculpting
+
+  medium:
+    label: "Moyenne"
+    keywords:
+      - medium
+      - moderate
+      - firm yet comfortable
+      - medium compression
+      - shaping
+      - shape
+
+  light:
+    label: "Légère"
+    keywords:
+      - light
+      - light compression
+      - everyday
+      - comfortable
+      - gentle
+      - soft
+      - seamless

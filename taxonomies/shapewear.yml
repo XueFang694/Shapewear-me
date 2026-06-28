@@ -1,0 +1,182 @@
+# Taxonomie shapewear — Familles, sous-familles et mots-clés de classification
+# Utilisée par app/processing/classifier.py
+
+families:
+
+  bodysuit:
+    label: "Bodysuit"
+    keywords:
+      - bodysuit
+      - body suit
+      - bodyshaper
+      - body shaper
+    subfamilies:
+      open_bust:
+        label: "Open Bust Bodysuit"
+        keywords:
+          - open bust
+          - open-bust
+          - strapless
+      mid_thigh:
+        label: "Mid-Thigh Bodysuit"
+        keywords:
+          - mid-thigh
+          - mid thigh
+          - thigh
+      shorts_built_in:
+        label: "Bodysuit with Shorts"
+        keywords:
+          - shorts bodysuit
+          - short bodysuit
+      full_body:
+        label: "Full Body Suit"
+        keywords:
+          - full body
+          - all-in-one
+          - all in one
+
+  shaper_short:
+    label: "Shaper Short"
+    keywords:
+      - short
+      - shorts
+      - bermuda
+      - bike short
+    subfamilies:
+      bike_short:
+        label: "Bike Short"
+        keywords:
+          - bike short
+          - cycling short
+          - bike
+      mid_thigh_short:
+        label: "Mid-Thigh Short"
+        keywords:
+          - mid thigh short
+          - mid-thigh short
+      brief:
+        label: "Shaper Brief"
+        keywords:
+          - brief
+          - boy short
+          - boyshort
+
+  shaper_legging:
+    label: "Shaper Legging"
+    keywords:
+      - legging
+      - tight
+      - trouser
+    subfamilies:
+      full_length:
+        label: "Full Length Legging"
+        keywords:
+          - full length
+          - ankle
+      capri:
+        label: "Capri Legging"
+        keywords:
+          - capri
+          - crop
+          - cropped
+      wide_leg:
+        label: "Wide Leg Pant"
+        keywords:
+          - wide leg
+          - wide-leg
+          - flare
+
+  bra:
+    label: "Bra"
+    keywords:
+      - bra
+      - bralette
+      - bustier
+      - brassiere
+    subfamilies:
+      underwire:
+        label: "Underwire Bra"
+        keywords:
+          - underwire
+          - under-wire
+      wireless:
+        label: "Wireless Bra"
+        keywords:
+          - wireless
+          - wire-free
+          - wirefree
+          - bralette
+      sports_bra:
+        label: "Sports Bra"
+        keywords:
+          - sports bra
+          - sport bra
+          - athletic bra
+
+  panty:
+    label: "Panty"
+    keywords:
+      - panty
+      - panties
+      - underwear
+      - thong
+      - g-string
+      - hipster
+    subfamilies:
+      thong:
+        label: "Thong"
+        keywords:
+          - thong
+          - g-string
+      hipster:
+        label: "Hipster"
+        keywords:
+          - hipster
+          - hip hugger
+      high_waist:
+        label: "High-Waist Panty"
+        keywords:
+          - high waist
+          - high-waist
+          - high rise
+
+  tank:
+    label: "Tank & Cami"
+    keywords:
+      - tank
+      - cami
+      - camisole
+      - top
+    subfamilies:
+      camisole:
+        label: "Camisole"
+        keywords:
+          - cami
+          - camisole
+      bodysuit_tank:
+        label: "Tank Bodysuit"
+        keywords:
+          - tank bodysuit
+          - body tank
+
+  swimwear:
+    label: "Swimwear"
+    keywords:
+      - swim
+      - swimwear
+      - swimsuit
+      - bathing suit
+      - one piece
+    subfamilies:
+      one_piece:
+        label: "One-Piece Swimsuit"
+        keywords:
+          - one piece
+          - one-piece
+          - maillot
+      bikini:
+        label: "Bikini"
+        keywords:
+          - bikini
+          - two piece
+          - two-piece

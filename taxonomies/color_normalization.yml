@@ -1,0 +1,103 @@
+# Normalisation des couleurs brutes → couleur canonique
+# Utilisée par app/processing/normalizer.py
+# Structure : raw_name_lowercase: canonical_name
+
+mappings:
+  # Noirs
+  "black": "Black"
+  "noir": "Black"
+  "very black": "Black"
+  "classic black": "Black"
+  "jet black": "Black"
+  "onyx": "Black"
+
+  # Blancs
+  "white": "White"
+  "blanc": "White"
+  "ivory": "Ivory"
+  "cream": "Ivory"
+  "off white": "Ivory"
+  "off-white": "Ivory"
+
+  # Nudes / Beiges
+  "nude": "Nude"
+  "beige": "Beige"
+  "natural": "Natural"
+  "skin": "Nude"
+  "tan": "Tan"
+  "camel": "Camel"
+  "champagne": "Champagne"
+  "sand": "Sand"
+  "toasted coconut": "Tan"
+  "cinnamon": "Cinnamon"
+  "cocoa": "Cocoa"
+  "espresso": "Espresso"
+  "cafe": "Cocoa"
+  "warm beige": "Beige"
+  "cool beige": "Beige"
+  "medium beige": "Beige"
+  "soft nude": "Nude"
+  "light nude": "Nude"
+
+  # Roses
+  "pink": "Pink"
+  "blush": "Blush"
+  "rose": "Rose"
+  "ballet": "Pink"
+  "bubblegum": "Pink"
+  "dusty pink": "Rose"
+  "berry": "Berry"
+  "mauve": "Mauve"
+
+  # Rouges
+  "red": "Red"
+  "cherry": "Red"
+  "crimson": "Red"
+  "burgundy": "Burgundy"
+  "wine": "Burgundy"
+  "bordeaux": "Burgundy"
+
+  # Bleus
+  "blue": "Blue"
+  "navy": "Navy"
+  "navy blue": "Navy"
+  "cobalt": "Cobalt"
+  "royal blue": "Blue"
+  "denim": "Denim"
+  "slate": "Slate"
+  "powder blue": "Light Blue"
+  "sky blue": "Light Blue"
+
+  # Verts
+  "green": "Green"
+  "olive": "Olive"
+  "sage": "Sage"
+  "forest": "Forest Green"
+  "emerald": "Emerald"
+  "mint": "Mint"
+
+  # Gris
+  "grey": "Grey"
+  "gray": "Grey"
+  "charcoal": "Charcoal"
+  "heather grey": "Grey"
+  "heather gray": "Grey"
+  "slate grey": "Slate"
+  "silver": "Silver"
+  "light grey": "Light Grey"
+
+  # Marrons
+  "brown": "Brown"
+  "chocolate": "Brown"
+  "mocha": "Mocha"
+
+  # Multicolore / Imprimés
+  "multi": "Multi"
+  "multicolor": "Multi"
+  "print": "Print"
+  "floral": "Floral"
+  "leopard": "Animal Print"
+  "animal": "Animal Print"
+  "stripe": "Stripe"
+  "stripes": "Stripe"
+  "pattern": "Print"
