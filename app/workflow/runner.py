@@ -1,5 +1,10 @@
 """
-WorkflowRunner v2 — gestion cycle de vie variantes, best_seller, matériaux.
+WorkflowRunner v3 — Enricher intégré + ScrapingEngine multi-threaded.
+
+Changements v3 :
+  - Injection de max_workers dans ScrapingEngine
+  - Appel de Enricher.compute() après chaque snapshot sauvegardé
+  - Métriques enrichies loggées et disponibles pour l'export
 """
 from __future__ import annotations
 
@@ -10,10 +15,12 @@ from datetime import datetime
 from typing import Any
 
 from app.connectors.registry import ConnectorRegistry
+from app.core.config import settings
 from app.core.events import event_bus
 from app.core.logger import get_logger
 from app.processing.change_detector import ChangeDetector
 from app.processing.classifier import Classifier
+from app.processing.enricher import Enricher
 from app.processing.normalizer import Normalizer
 from app.scraping.engine import ScrapingEngine
 from app.storage.database import get_db, init_db
@@ -42,26 +49,38 @@ class RunResult:
 
 class WorkflowRunner:
 
-    def __init__(self) -> None:
-        self._registry   = ConnectorRegistry()
-        self._normalizer = Normalizer()
-        self._classifier = Classifier()
-        self._cancelled  = False
+    def __init__(self, max_workers: int | None = None) -> None:
+        self._registry    = ConnectorRegistry()
+        self._normalizer  = Normalizer()
+        self._classifier  = Classifier()
+        self._enricher    = Enricher(lookback_days=90)
+        self._cancelled   = False
+        self._max_workers = max_workers or getattr(settings, "MAX_WORKERS", 2)
         init_db()
+
+    # ── Exécution ─────────────────────────────────────────────────────────
 
     def run(self, brand_slugs: list[str] | None = None, **_) -> list[RunResult]:
         if brand_slugs is None:
             brand_slugs = self._registry.list_connectors()
         results: list[RunResult] = []
         event_bus.emit("crawl.session.started", brands=brand_slugs)
-        log.info("Démarrage session", brands=brand_slugs)
+        log.info("Démarrage session", brands=brand_slugs, max_workers=self._max_workers)
 
         for slug in brand_slugs:
-            if self._cancelled: break
+            if self._cancelled:
+                break
             results.append(self._run_brand(slug))
 
-        event_bus.emit("crawl.session.completed", summary={r.brand_slug: r.status for r in results})
-        log.info("Session terminée", brands=brand_slugs, total_products=sum(r.products_found for r in results))
+        event_bus.emit(
+            "crawl.session.completed",
+            summary={r.brand_slug: r.status for r in results},
+        )
+        log.info(
+            "Session terminée",
+            brands=brand_slugs,
+            total_products=sum(r.products_found for r in results),
+        )
         return results
 
     def _run_brand(self, brand_slug: str) -> RunResult:
@@ -72,52 +91,90 @@ class WorkflowRunner:
             meta      = connector.get_metadata()
 
             with get_db() as db:
-                brand = BrandRepository(db).get_or_create(slug=meta.slug, name=meta.name, base_url=meta.base_url)
+                brand = BrandRepository(db).get_or_create(
+                    slug=meta.slug, name=meta.name, base_url=meta.base_url
+                )
                 brand_id = brand.id
-                cs   = CrawlSessionRepository(db).create(brand_id=brand_id)
+                cs       = CrawlSessionRepository(db).create(brand_id=brand_id)
                 result.session_id = cs.id
 
             log.info("Crawl marque démarré", brand=brand_slug, session_id=result.session_id)
 
             with get_db() as db:
-                active_before = [p.external_id for p in ProductRepository(db).find_active_by_brand(brand_id)]
+                active_before = [
+                    p.external_id
+                    for p in ProductRepository(db).find_active_by_brand(brand_id)
+                ]
 
             crawled_ids: list[str] = []
-            for raw in ScrapingEngine(connector, session_id=result.session_id).crawl():
-                if self._cancelled: break
+            engine = ScrapingEngine(
+                connector,
+                session_id=result.session_id,
+                max_workers=self._max_workers,
+            )
+
+            for raw in engine.crawl():
+                if self._cancelled:
+                    break
                 try:
                     self._process_product(raw, result, brand_id)
                     crawled_ids.append(raw.extra.get("handle") or raw.external_id)
                 except Exception as exc:
                     result.errors += 1
-                    log.error("Erreur pipeline", brand=brand_slug, error=str(exc), traceback=traceback.format_exc())
+                    log.error(
+                        "Erreur pipeline",
+                        brand=brand_slug,
+                        error=str(exc),
+                        traceback=traceback.format_exc(),
+                    )
 
-            removed = self._detect_removals(brand_id, brand_slug, active_before, crawled_ids, result)
+            removed = self._detect_removals(
+                brand_id, brand_slug, active_before, crawled_ids, result
+            )
 
-            result.status    = "completed"
+            result.status     = "completed"
             result.duration_s = round(time.monotonic() - t0, 1)
-            result.ended_at  = datetime.utcnow()
+            result.ended_at   = datetime.utcnow()
 
             with get_db() as db:
                 CrawlSessionRepository(db).complete(result.session_id, {
-                    "products_found": result.products_found, "products_new": result.products_new,
+                    "products_found":   result.products_found,
+                    "products_new":     result.products_new,
                     "products_changed": result.products_changed,
-                    "products_removed": len(removed), "errors_count": result.errors,
+                    "products_removed": len(removed),
+                    "errors_count":     result.errors,
                 })
-            log.info("Crawl marque terminé", brand=brand_slug, found=result.products_found,
-                     new=result.products_new, changed=result.products_changed,
-                     removed=len(removed), errors=result.errors, duration_s=result.duration_s)
+
+            log.info(
+                "Crawl marque terminé",
+                brand=brand_slug,
+                found=result.products_found,
+                new=result.products_new,
+                changed=result.products_changed,
+                removed=len(removed),
+                errors=result.errors,
+                duration_s=result.duration_s,
+            )
 
         except Exception as exc:
-            result.status       = "failed"
+            result.status        = "failed"
             result.error_message = str(exc)
-            result.duration_s   = round(time.monotonic() - t0, 1)
-            log.error("Crawl marque échoué", brand=brand_slug, error=str(exc), traceback=traceback.format_exc())
+            result.duration_s    = round(time.monotonic() - t0, 1)
+            log.error(
+                "Crawl marque échoué",
+                brand=brand_slug,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
             if result.session_id:
                 try:
-                    with get_db() as db: CrawlSessionRepository(db).fail(result.session_id)
-                except Exception: pass
+                    with get_db() as db:
+                        CrawlSessionRepository(db).fail(result.session_id)
+                except Exception:
+                    pass
         return result
+
+    # ── Pipeline produit ──────────────────────────────────────────────────
 
     def _process_product(self, raw: Any, result: RunResult, brand_id: int) -> None:
         normalized = self._normalizer.process(raw)
@@ -133,19 +190,17 @@ class WorkflowRunner:
             is_new        = existing is None
             last_snapshot = snap_repo.get_latest(existing.id) if existing else None
 
-            # Gérer best_seller dates
             now = datetime.utcnow()
             product_dict = normalized.to_product_dict()
             product_dict["brand_id"] = brand_id
+
+            # Gérer best_seller dates
             if normalized.is_best_seller:
                 if existing is None or not existing.is_best_seller:
                     product_dict["best_seller_first_seen"] = now
                 product_dict["best_seller_last_seen"] = now
-            elif existing and existing.is_best_seller:
-                # Perte du badge Best Seller → ne pas écraser best_seller_first_seen
-                pass
 
-            # Gérer retour en stock (produit était inactif)
+            # Retour en stock (produit était inactif)
             if existing and not existing.is_active:
                 product_dict["back_in_stock_at"] = now
                 product_dict["removed_at"]       = None
@@ -163,7 +218,20 @@ class WorkflowRunner:
             snap_dict["session_id"] = result.session_id
             snap_repo.save(snap_dict)
 
-            # Variantes granulaires (cycle de vie)
+            # Enricher — métriques dérivées depuis l'historique
+            try:
+                history = snap_repo.get_price_history(product.id, days=90)
+                metrics = self._enricher.compute(product, history)
+                log.debug(
+                    "Enrichissement",
+                    product=normalized.name,
+                    promo_freq=metrics.promo_frequency_pct,
+                    price_stability=metrics.price_stability,
+                )
+            except Exception as exc:
+                log.debug("Enrichissement ignoré", error=str(exc))
+
+            # Variantes granulaires
             detailed_variants: list[dict] = normalized.variants or []
             if detailed_variants:
                 variant_events = variant_repo.sync_variants(product.id, detailed_variants)
@@ -180,19 +248,37 @@ class WorkflowRunner:
                 change_repo.save(cd)
 
             result.products_found += 1
-            if is_new: result.products_new += 1
-            elif changes: result.products_changed += 1
+            if is_new:
+                result.products_new += 1
+            elif changes:
+                result.products_changed += 1
 
         status = "NOUVEAU" if is_new else "MÀJ"
         bs_tag = " ⭐" if normalized.is_best_seller else ""
-        event_bus.emit("product.saved", product_id=None, brand=normalized.brand_slug,
-                       name=f"[{status}]{bs_tag} {normalized.brand_slug} — {normalized.name}",
-                       is_new=is_new, session_id=result.session_id)
+        event_bus.emit(
+            "product.saved",
+            product_id=None,
+            brand=normalized.brand_slug,
+            name=f"[{status}]{bs_tag} {normalized.brand_slug} — {normalized.name}",
+            is_new=is_new,
+            session_id=result.session_id,
+        )
 
-    def _detect_removals(self, brand_id, brand_slug, before_ids, crawled_ids, result):
-        crawled_set   = set(crawled_ids)
-        removed_eids  = [eid for eid in before_ids if eid not in crawled_set]
-        if not removed_eids: return []
+    # ── Détection des suppressions ────────────────────────────────────────
+
+    def _detect_removals(
+        self,
+        brand_id: int,
+        brand_slug: str,
+        before_ids: list[str],
+        crawled_ids: list[str],
+        result: RunResult,
+    ) -> list[str]:
+        crawled_set  = set(crawled_ids)
+        removed_eids = [eid for eid in before_ids if eid not in crawled_set]
+        if not removed_eids:
+            return []
+
         with get_db() as db:
             prod_repo   = ProductRepository(db)
             change_repo = ChangeEventRepository(db)
@@ -202,12 +288,18 @@ class WorkflowRunner:
                 if p and p.is_active:
                     to_remove.append(p.id)
                     if result.session_id:
-                        change_repo.save({"product_id": p.id, "session_id": result.session_id,
-                                          "event_type": "product.removed", "field_name": None,
-                                          "old_value": p.name, "new_value": None})
+                        change_repo.save({
+                            "product_id":  p.id,
+                            "session_id":  result.session_id,
+                            "event_type":  "product.removed",
+                            "field_name":  None,
+                            "old_value":   p.name,
+                            "new_value":   None,
+                        })
             if to_remove:
                 prod_repo.mark_as_removed(to_remove)
                 log.info("Produits supprimés", brand=brand_slug, count=len(to_remove))
+
         return removed_eids
 
     def cancel(self) -> None:
