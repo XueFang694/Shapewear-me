@@ -1,16 +1,10 @@
 """
-Vue Paramètres — Configuration complète de l'application.
-
-Paramètres Phase 2 :
-  - Délai entre requêtes (slider + affichage valeur)
-  - Nombre de workers de scraping
-  - Répertoire d'export (sélecteur de dossier)
-  - Rotation User-Agent (toggle)
-  - Base de données (chemin, test connexion, sauvegarde, restauration)
-  - Proxy HTTP (champ texte, test)
-  - Niveau de log
-  - Purge des données (snapshots > N jours)
-  - Bouton "Sauvegarder" / "Réinitialiser"
+Vue Paramètres Phase 3 — Étend la Phase 2 avec :
+  - Configuration du planificateur (mode, heure, jour)
+  - Gestion du pool de proxies rotatifs
+  - Serveur API REST (activation, port, statut)
+  - Lien vers la vue d'audit de classification
+  - Tous les paramètres Phase 2 conservés
 """
 from __future__ import annotations
 
@@ -19,7 +13,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,14 +25,19 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSlider,
     QSpinBox,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from PySide6.QtCore import QTime
 
 from app.core.config import settings, PROJECT_ROOT
 from app.core.logger import get_logger
@@ -51,40 +50,48 @@ class SectionTitle(QLabel):
         super().__init__(text, parent)
         f = QFont(); f.setBold(True); f.setPointSize(10)
         self.setFont(f)
-        self.setStyleSheet("color: #1E293B; padding-top: 6px;")
+        self.setStyleSheet("color: #1E293B; padding-top: 8px;")
 
 
-class SettingRow(QWidget):
-    """Ligne paramètre : label + widget + description optionnelle."""
-    def __init__(self, label: str, widget: QWidget, desc: str = "", parent=None) -> None:
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        lbl = QLabel(label)
-        lbl.setMinimumWidth(200)
-        lbl.setStyleSheet("color: #475569; font-size: 9pt;")
-        layout.addWidget(lbl)
-        layout.addWidget(widget)
-        if desc:
-            d = QLabel(desc)
-            d.setStyleSheet("color: #94A3B8; font-size: 8pt;")
-            layout.addWidget(d)
-        layout.addStretch()
+def _make_group(title: str = "") -> QGroupBox:
+    grp = QGroupBox(title)
+    grp.setStyleSheet(
+        "QGroupBox { border: 1px solid #E2E8F0; border-radius: 8px; "
+        "background: white; padding: 10px 14px; margin-top: 4px; }"
+        "QGroupBox::title { color: #64748B; font-size: 9pt; subcontrol-origin: margin; left: 10px; }"
+    )
+    return grp
+
+
+def _row(label: str, widget: QWidget, desc: str = "") -> QWidget:
+    w = QWidget()
+    l = QHBoxLayout(w)
+    l.setContentsMargins(0, 2, 0, 2)
+    lbl = QLabel(label)
+    lbl.setMinimumWidth(200)
+    lbl.setStyleSheet("color: #475569; font-size: 9pt;")
+    l.addWidget(lbl)
+    l.addWidget(widget)
+    if desc:
+        d = QLabel(desc)
+        d.setStyleSheet("color: #94A3B8; font-size: 8pt;")
+        l.addWidget(d)
+    l.addStretch()
+    return w
 
 
 class SettingsView(QScrollArea):
-    """Vue Paramètres avec sauvegarde dans settings.json."""
+    """Vue Paramètres complète Phase 3."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
-        self._unsaved = False
 
         container = QWidget()
-        main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(24, 16, 24, 24)
-        main_layout.setSpacing(14)
+        main = QVBoxLayout(container)
+        main.setContentsMargins(24, 16, 24, 24)
+        main.setSpacing(14)
         self.setWidget(container)
 
         # Titre
@@ -92,83 +99,202 @@ class SettingsView(QScrollArea):
         tf = QFont(); tf.setPointSize(14); tf.setBold(True)
         title.setFont(tf)
         title.setStyleSheet("color: #1E293B;")
-        main_layout.addWidget(title)
+        main.addWidget(title)
 
-        subtitle = QLabel("Configuration de l'application Market Intelligence Platform")
+        subtitle = QLabel("Configuration de la plateforme Market Intelligence — Phase 3")
         subtitle.setStyleSheet("color: #64748B; font-size: 10pt;")
-        main_layout.addWidget(subtitle)
+        main.addWidget(subtitle)
 
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #E2E8F0;"); main_layout.addWidget(sep)
+        sep.setStyleSheet("color: #E2E8F0;"); main.addWidget(sep)
 
         # ── SCRAPING ──────────────────────────────────────────────────────
-        main_layout.addWidget(SectionTitle("🕷️  Scraping"))
-        scraping_grp = self._make_group()
-        grp_l = scraping_grp.layout()
+        main.addWidget(SectionTitle("🕷️  Scraping"))
+        sc_grp = _make_group()
+        sc_l = QVBoxLayout(sc_grp)
 
-        # Workers
-        self._workers_spin = QSpinBox()
-        self._workers_spin.setRange(1, 6)
-        self._workers_spin.setValue(getattr(settings, "MAX_WORKERS", 2))
-        self._workers_spin.setFixedWidth(80)
-        self._workers_spin.valueChanged.connect(self._mark_unsaved)
-        grp_l.addWidget(SettingRow("Threads de scraping",
-            self._workers_spin, "1 = séquentiel, 2-4 = parallèle (recommandé)"))
+        self._workers = QSpinBox()
+        self._workers.setRange(1, 6)
+        self._workers.setValue(getattr(settings, "MAX_WORKERS", 2))
+        self._workers.setFixedWidth(80)
+        sc_l.addWidget(_row("Threads de scraping", self._workers, "1=séquentiel, 2-4=parallèle"))
 
-        # Délai min
         self._delay_min = QDoubleSpinBox()
-        self._delay_min.setRange(0.5, 10.0)
-        self._delay_min.setSingleStep(0.5)
-        self._delay_min.setSuffix(" s")
-        self._delay_min.setValue(1.5)
+        self._delay_min.setRange(0.5, 10.0); self._delay_min.setSingleStep(0.5)
+        self._delay_min.setSuffix(" s"); self._delay_min.setValue(1.5)
         self._delay_min.setFixedWidth(90)
-        self._delay_min.valueChanged.connect(self._mark_unsaved)
-        grp_l.addWidget(SettingRow("Délai minimum entre requêtes", self._delay_min))
+        sc_l.addWidget(_row("Délai minimum", self._delay_min))
 
-        # Délai max
         self._delay_max = QDoubleSpinBox()
-        self._delay_max.setRange(1.0, 20.0)
-        self._delay_max.setSingleStep(0.5)
-        self._delay_max.setSuffix(" s")
-        self._delay_max.setValue(4.0)
+        self._delay_max.setRange(1.0, 20.0); self._delay_max.setSingleStep(0.5)
+        self._delay_max.setSuffix(" s"); self._delay_max.setValue(4.0)
         self._delay_max.setFixedWidth(90)
-        self._delay_max.valueChanged.connect(self._mark_unsaved)
-        grp_l.addWidget(SettingRow("Délai maximum entre requêtes", self._delay_max))
+        sc_l.addWidget(_row("Délai maximum", self._delay_max))
 
-        # Rotation UA
-        self._rotate_ua = QCheckBox("Activer la rotation des User-Agents")
+        self._rotate_ua = QCheckBox("Rotation des User-Agents")
         self._rotate_ua.setChecked(True)
-        self._rotate_ua.stateChanged.connect(self._mark_unsaved)
-        grp_l.addWidget(self._rotate_ua)
+        sc_l.addWidget(self._rotate_ua)
+        main.addWidget(sc_grp)
 
-        # Proxy
+        # ── PLANIFICATEUR ─────────────────────────────────────────────────
+        main.addWidget(SectionTitle("⏰  Planification automatique"))
+        sched_grp = _make_group()
+        sched_l = QVBoxLayout(sched_grp)
+
+        self._sched_enabled = QCheckBox("Activer la planification automatique")
+        sched_l.addWidget(self._sched_enabled)
+
+        self._sched_mode = QComboBox()
+        self._sched_mode.addItems(["Manuel", "Quotidien", "Hebdomadaire"])
+        self._sched_mode.setFixedWidth(160)
+        self._sched_mode.currentIndexChanged.connect(self._on_sched_mode_changed)
+        sched_l.addWidget(_row("Mode", self._sched_mode))
+
+        self._sched_time = QTimeEdit()
+        self._sched_time.setTime(QTime(2, 0))
+        self._sched_time.setDisplayFormat("HH:mm")
+        self._sched_time.setFixedWidth(90)
+        sched_l.addWidget(_row("Heure d'exécution", self._sched_time))
+
+        self._sched_weekday = QComboBox()
+        self._sched_weekday.addItems([
+            "Lundi", "Mardi", "Mercredi", "Jeudi",
+            "Vendredi", "Samedi", "Dimanche",
+        ])
+        self._sched_weekday.setFixedWidth(140)
+        self._sched_weekday_row = _row("Jour (hebdomadaire)", self._sched_weekday)
+        self._sched_weekday_row.hide()
+        sched_l.addWidget(self._sched_weekday_row)
+
+        # Statut planificateur
+        self._sched_status_label = QLabel("Statut : —")
+        self._sched_status_label.setStyleSheet("color: #64748B; font-size: 8pt; padding-top: 4px;")
+        sched_l.addWidget(self._sched_status_label)
+
+        self._load_scheduler_config()
+        self._refresh_scheduler_status()
+        # Rafraîchir le statut toutes les 30s
+        timer = QTimer(self)
+        timer.timeout.connect(self._refresh_scheduler_status)
+        timer.start(30_000)
+
+        main.addWidget(sched_grp)
+
+        # ── PROXIES ───────────────────────────────────────────────────────
+        main.addWidget(SectionTitle("🌐  Pool de Proxies Rotatifs"))
+        proxy_grp = _make_group()
+        proxy_l = QVBoxLayout(proxy_grp)
+
+        proxy_l.addWidget(QLabel(
+            "Entrez un proxy par ligne (http://user:pass@ip:port ou socks5://...) :"
+        ))
+
+        self._proxy_list_widget = QListWidget()
+        self._proxy_list_widget.setMaximumHeight(120)
+        self._proxy_list_widget.setStyleSheet(
+            "QListWidget { border: 1px solid #CBD5E1; border-radius: 6px; "
+            "font-size: 8pt; font-family: monospace; }"
+        )
+        proxy_l.addWidget(self._proxy_list_widget)
+
+        proxy_edit_row = QHBoxLayout()
         self._proxy_input = QLineEdit()
-        self._proxy_input.setPlaceholderText("http://user:pass@proxy:port  (laisser vide si aucun)")
-        self._proxy_input.setText(getattr(settings, "PROXY_URL", ""))
-        self._proxy_input.textChanged.connect(self._mark_unsaved)
+        self._proxy_input.setPlaceholderText("http://user:pass@ip:port")
         self._proxy_input.setStyleSheet(
             "QLineEdit { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 8px; }"
         )
-        proxy_row = QHBoxLayout()
-        proxy_row.addWidget(QLabel("Proxy HTTP/SOCKS :"))
-        proxy_row.addWidget(self._proxy_input, 1)
-        btn_test_proxy = QPushButton("Tester")
-        btn_test_proxy.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 4px; padding: 3px 8px; }"
+        proxy_edit_row.addWidget(self._proxy_input, 1)
+        btn_add_proxy = QPushButton("+ Ajouter")
+        btn_add_proxy.setStyleSheet(
+            "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
+            "padding: 4px 10px; font-size: 8pt; }"
         )
-        btn_test_proxy.clicked.connect(self._test_proxy)
-        proxy_row.addWidget(btn_test_proxy)
-        proxy_w = QWidget(); proxy_w.setLayout(proxy_row)
-        grp_l.addWidget(proxy_w)
+        btn_add_proxy.clicked.connect(self._add_proxy)
+        proxy_edit_row.addWidget(btn_add_proxy)
+        btn_remove_proxy = QPushButton("Supprimer")
+        btn_remove_proxy.setStyleSheet(
+            "QPushButton { background: #DC2626; color: white; border-radius: 6px; "
+            "padding: 4px 10px; font-size: 8pt; }"
+        )
+        btn_remove_proxy.clicked.connect(self._remove_proxy)
+        proxy_edit_row.addWidget(btn_remove_proxy)
+        proxy_edit_w = QWidget(); proxy_edit_w.setLayout(proxy_edit_row)
+        proxy_l.addWidget(proxy_edit_w)
 
-        main_layout.addWidget(scraping_grp)
+        proxy_opts_row = QHBoxLayout()
+        proxy_opts_row.addWidget(QLabel("Stratégie :"))
+        self._proxy_strategy = QComboBox()
+        self._proxy_strategy.addItems(["round_robin", "random", "sticky"])
+        self._proxy_strategy.setFixedWidth(130)
+        proxy_opts_row.addWidget(self._proxy_strategy)
+        proxy_opts_row.addStretch()
+        btn_test_proxies = QPushButton("🔍 Tester tous les proxies")
+        btn_test_proxies.setStyleSheet(
+            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; }"
+        )
+        btn_test_proxies.clicked.connect(self._test_proxies)
+        proxy_opts_row.addWidget(btn_test_proxies)
+        proxy_opts_w = QWidget(); proxy_opts_w.setLayout(proxy_opts_row)
+        proxy_l.addWidget(proxy_opts_w)
+
+        self._proxy_stats_label = QLabel("")
+        self._proxy_stats_label.setStyleSheet("color: #64748B; font-size: 8pt;")
+        proxy_l.addWidget(self._proxy_stats_label)
+
+        self._load_proxy_config()
+        main.addWidget(proxy_grp)
+
+        # ── API REST ──────────────────────────────────────────────────────
+        main.addWidget(SectionTitle("🔌  API REST Locale"))
+        api_grp = _make_group()
+        api_l = QVBoxLayout(api_grp)
+
+        api_info = QLabel(
+            "L'API REST expose les données via HTTP pour les intégrations externes "
+            "(Power BI, Google Sheets, scripts Python, etc.)."
+        )
+        api_info.setWordWrap(True)
+        api_info.setStyleSheet("color: #64748B; font-size: 9pt;")
+        api_l.addWidget(api_info)
+
+        api_row = QHBoxLayout()
+        self._api_port = QSpinBox()
+        self._api_port.setRange(1024, 65535)
+        self._api_port.setValue(8765)
+        self._api_port.setFixedWidth(90)
+        api_row.addWidget(QLabel("Port :"))
+        api_row.addWidget(self._api_port)
+        api_row.addStretch()
+
+        self._api_btn = QPushButton("▶ Démarrer l'API")
+        self._api_btn.setStyleSheet(
+            "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
+            "padding: 5px 14px; font-weight: bold; }"
+            "QPushButton:hover { background: #1D4ED8; }"
+        )
+        self._api_btn.clicked.connect(self._toggle_api)
+        api_row.addWidget(self._api_btn)
+
+        btn_open_docs = QPushButton("📖 Ouvrir /docs")
+        btn_open_docs.setStyleSheet(
+            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 5px 10px; }"
+        )
+        btn_open_docs.clicked.connect(self._open_api_docs)
+        api_row.addWidget(btn_open_docs)
+
+        api_row_w = QWidget(); api_row_w.setLayout(api_row)
+        api_l.addWidget(api_row_w)
+
+        self._api_status_label = QLabel("Statut : Arrêtée")
+        self._api_status_label.setStyleSheet("color: #64748B; font-size: 8pt;")
+        api_l.addWidget(self._api_status_label)
+        main.addWidget(api_grp)
 
         # ── BASE DE DONNÉES ───────────────────────────────────────────────
-        main_layout.addWidget(SectionTitle("🗄️  Base de données"))
-        db_grp = self._make_group()
-        db_l = db_grp.layout()
+        main.addWidget(SectionTitle("🗄️  Base de données"))
+        db_grp = _make_group()
+        db_l = QVBoxLayout(db_grp)
 
-        # Chemin DB (lecture seule — résolu dynamiquement)
         from app.storage.database import get_active_db_url
         active_url = get_active_db_url() or settings.DATABASE_URL
         db_path_lbl = QLabel(active_url.replace("sqlite:///", ""))
@@ -180,122 +306,66 @@ class SettingsView(QScrollArea):
         db_l.addWidget(QLabel("Chemin actuel :"))
         db_l.addWidget(db_path_lbl)
 
-        # Boutons DB
         db_btn_row = QHBoxLayout()
-        btn_test_db = QPushButton("✓ Tester la connexion")
-        btn_test_db.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 12px; }"
-            "QPushButton:hover { background: #F1F5F9; }"
-        )
-        btn_test_db.clicked.connect(self._test_db)
-        db_btn_row.addWidget(btn_test_db)
-
-        btn_backup = QPushButton("💾 Sauvegarder")
-        btn_backup.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border-radius: 6px; padding: 4px 12px; }"
-        )
-        btn_backup.clicked.connect(self._backup_db)
-        db_btn_row.addWidget(btn_backup)
-
-        btn_restore = QPushButton("↺ Restaurer")
-        btn_restore.setStyleSheet(
-            "QPushButton { background: #D97706; color: white; border-radius: 6px; padding: 4px 12px; }"
-        )
-        btn_restore.clicked.connect(self._restore_db)
-        db_btn_row.addWidget(btn_restore)
+        for label, slot, style in [
+            ("✓ Tester",    self._test_db,    "border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px;"),
+            ("💾 Sauvegarder", self._backup_db, "background: #2563EB; color: white; border-radius: 6px; padding: 4px 10px;"),
+            ("↺ Restaurer",  self._restore_db, "background: #D97706; color: white; border-radius: 6px; padding: 4px 10px;"),
+        ]:
+            btn = QPushButton(label)
+            btn.setStyleSheet(f"QPushButton {{ {style} }}")
+            btn.clicked.connect(slot)
+            db_btn_row.addWidget(btn)
         db_btn_row.addStretch()
 
-        db_btn_w = QWidget(); db_btn_w.setLayout(db_btn_row)
-        db_l.addWidget(db_btn_w)
-
-        # Purge des snapshots anciens
         purge_row = QHBoxLayout()
-        purge_row.addWidget(QLabel("Purger les snapshots de plus de"))
+        purge_row.addWidget(QLabel("Purger les snapshots > "))
         self._purge_days = QSpinBox()
-        self._purge_days.setRange(30, 365)
-        self._purge_days.setValue(180)
-        self._purge_days.setSuffix(" jours")
-        self._purge_days.setFixedWidth(110)
+        self._purge_days.setRange(30, 365); self._purge_days.setValue(180)
+        self._purge_days.setSuffix(" jours"); self._purge_days.setFixedWidth(110)
         purge_row.addWidget(self._purge_days)
         btn_purge = QPushButton("Purger")
         btn_purge.setStyleSheet(
-            "QPushButton { background: #DC2626; color: white; border-radius: 6px; padding: 4px 10px; }"
+            "QPushButton { background: #DC2626; color: white; border-radius: 6px; padding: 4px 8px; }"
         )
         btn_purge.clicked.connect(self._purge_snapshots)
         purge_row.addWidget(btn_purge)
         purge_row.addStretch()
+
+        db_btn_w = QWidget(); db_btn_w.setLayout(db_btn_row)
+        db_l.addWidget(db_btn_w)
         purge_w = QWidget(); purge_w.setLayout(purge_row)
         db_l.addWidget(purge_w)
-
-        main_layout.addWidget(db_grp)
-
-        # ── EXPORTS ──────────────────────────────────────────────────────
-        main_layout.addWidget(SectionTitle("📂  Exports"))
-        export_grp = self._make_group()
-        exp_l = export_grp.layout()
-
-        export_dir_row = QHBoxLayout()
-        self._export_dir_input = QLineEdit(str(settings.EXPORT_DIR))
-        self._export_dir_input.setReadOnly(True)
-        self._export_dir_input.setStyleSheet(
-            "QLineEdit { border: 1px solid #CBD5E1; border-radius: 6px; "
-            "padding: 4px 8px; background: #F8FAFC; }"
-        )
-        export_dir_row.addWidget(QLabel("Répertoire :"))
-        export_dir_row.addWidget(self._export_dir_input, 1)
-        btn_browse = QPushButton("Parcourir…")
-        btn_browse.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 4px; padding: 3px 8px; }"
-        )
-        btn_browse.clicked.connect(self._browse_export_dir)
-        export_dir_row.addWidget(btn_browse)
-        exp_dir_w = QWidget(); exp_dir_w.setLayout(export_dir_row)
-        exp_l.addWidget(exp_dir_w)
-
-        btn_open_dir = QPushButton("📁 Ouvrir le dossier d'exports")
-        btn_open_dir.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 12px; }"
-        )
-        btn_open_dir.clicked.connect(self._open_export_dir)
-        exp_l.addWidget(btn_open_dir)
-        main_layout.addWidget(export_grp)
+        main.addWidget(db_grp)
 
         # ── LOGS ─────────────────────────────────────────────────────────
-        main_layout.addWidget(SectionTitle("📋  Logs"))
-        log_grp = self._make_group()
-        log_l = log_grp.layout()
-
+        main.addWidget(SectionTitle("📋  Logs"))
+        log_grp = _make_group()
+        log_l = QVBoxLayout(log_grp)
         self._log_level = QComboBox()
         self._log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self._log_level.setCurrentText(getattr(settings, "LOG_LEVEL", "INFO"))
         self._log_level.setFixedWidth(120)
-        self._log_level.currentTextChanged.connect(self._mark_unsaved)
-        log_l.addWidget(SettingRow("Niveau de log", self._log_level))
-
-        log_dir_lbl = QLabel(str(settings.LOG_DIR))
-        log_dir_lbl.setStyleSheet("color: #64748B; font-size: 8pt; font-family: monospace;")
-        log_l.addWidget(SettingRow("Répertoire logs", log_dir_lbl))
-
+        log_l.addWidget(_row("Niveau de log", self._log_level))
         btn_open_logs = QPushButton("📁 Ouvrir le dossier de logs")
         btn_open_logs.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 12px; }"
+            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; }"
         )
         btn_open_logs.clicked.connect(self._open_log_dir)
         log_l.addWidget(btn_open_logs)
-        main_layout.addWidget(log_grp)
+        main.addWidget(log_grp)
 
         # ── Boutons save/reset ────────────────────────────────────────────
         action_row = QHBoxLayout()
-        self._save_btn = QPushButton("💾 Sauvegarder les paramètres")
+        self._save_btn = QPushButton("💾 Sauvegarder tous les paramètres")
         self._save_btn.setMinimumHeight(36)
         self._save_btn.setStyleSheet(
             "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
             "font-weight: bold; padding: 0 20px; }"
             "QPushButton:hover { background: #1D4ED8; }"
         )
-        self._save_btn.clicked.connect(self._save_settings)
+        self._save_btn.clicked.connect(self._save_all)
         action_row.addWidget(self._save_btn)
-
         btn_reset = QPushButton("↺ Réinitialiser")
         btn_reset.setMinimumHeight(36)
         btn_reset.setStyleSheet(
@@ -304,27 +374,113 @@ class SettingsView(QScrollArea):
         btn_reset.clicked.connect(self._reset_settings)
         action_row.addWidget(btn_reset)
         action_row.addStretch()
-
         action_w = QWidget(); action_w.setLayout(action_row)
-        main_layout.addWidget(action_w)
-        main_layout.addStretch()
+        main.addWidget(action_w)
+        main.addStretch()
 
-    # ── Helpers UI ────────────────────────────────────────────────────────
+    # ── Planificateur ─────────────────────────────────────────────────────
 
-    def _make_group(self) -> QGroupBox:
-        grp = QGroupBox()
-        grp.setStyleSheet(
-            "QGroupBox { border: 1px solid #E2E8F0; border-radius: 8px; "
-            "background: white; padding: 8px 12px; }"
+    def _on_sched_mode_changed(self, idx: int) -> None:
+        self._sched_weekday_row.setVisible(idx == 2)
+
+    def _load_scheduler_config(self) -> None:
+        try:
+            from app.workflow.scheduler import Scheduler
+            sched = Scheduler()
+            cfg = sched.get_config()
+            self._sched_enabled.setChecked(cfg.enabled)
+            mode_map = {"manual": 0, "daily": 1, "weekly": 2}
+            self._sched_mode.setCurrentIndex(mode_map.get(cfg.mode, 0))
+            self._sched_time.setTime(QTime(cfg.hour, cfg.minute))
+            self._sched_weekday.setCurrentIndex(cfg.weekday)
+            self._sched_weekday_row.setVisible(cfg.mode == "weekly")
+        except Exception as exc:
+            log.debug("Config scheduler non chargée", error=str(exc))
+
+    def _refresh_scheduler_status(self) -> None:
+        try:
+            from app.workflow.scheduler import Scheduler
+            status = Scheduler().get_status()
+            cfg_desc = status.get("description", "—")
+            next_run = status.get("next_run")
+            if next_run:
+                from datetime import datetime as dt
+                try:
+                    nr = dt.fromisoformat(next_run)
+                    cfg_desc += f"  —  Prochaine : {nr.strftime('%d/%m %H:%M')}"
+                except Exception:
+                    pass
+            self._sched_status_label.setText(f"Statut : {cfg_desc}")
+        except Exception:
+            self._sched_status_label.setText("Statut : —")
+
+    # ── Proxies ──────────────────────────────────────────────────────────
+
+    def _load_proxy_config(self) -> None:
+        try:
+            settings_path = PROJECT_ROOT / "settings.json"
+            if settings_path.exists():
+                with open(settings_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                for proxy in data.get("PROXY_LIST", []):
+                    self._proxy_list_widget.addItem(proxy)
+                strategy = data.get("PROXY_STRATEGY", "round_robin")
+                idx = self._proxy_strategy.findText(strategy)
+                if idx >= 0:
+                    self._proxy_strategy.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+    def _add_proxy(self) -> None:
+        url = self._proxy_input.text().strip()
+        if url:
+            self._proxy_list_widget.addItem(url)
+            self._proxy_input.clear()
+
+    def _remove_proxy(self) -> None:
+        row = self._proxy_list_widget.currentRow()
+        if row >= 0:
+            self._proxy_list_widget.takeItem(row)
+
+    def _test_proxies(self) -> None:
+        from app.scraping.proxy_manager import ProxyManager
+        proxies = [
+            self._proxy_list_widget.item(i).text()
+            for i in range(self._proxy_list_widget.count())
+        ]
+        if not proxies:
+            QMessageBox.information(self, "Proxies", "Aucun proxy configuré.")
+            return
+        manager = ProxyManager(proxy_list=proxies, validate_on_start=True)
+        summary = manager.get_summary()
+        self._proxy_stats_label.setText(
+            f"Résultat : {summary['available']} OK, "
+            f"{summary['blacklisted']} invalides sur {summary['total']}"
         )
-        l = QVBoxLayout(grp)
-        l.setSpacing(6)
-        return grp
 
-    def _mark_unsaved(self) -> None:
-        self._unsaved = True
+    # ── API REST ──────────────────────────────────────────────────────────
 
-    # ── Actions ──────────────────────────────────────────────────────────
+    def _toggle_api(self) -> None:
+        from app.api.server import start_api_server, stop_api_server, is_api_running
+        if is_api_running():
+            stop_api_server()
+            self._api_btn.setText("▶ Démarrer l'API")
+            self._api_status_label.setText("Statut : Arrêtée")
+            self._api_status_label.setStyleSheet("color: #64748B; font-size: 8pt;")
+        else:
+            port = self._api_port.value()
+            url  = start_api_server(port=port)
+            self._api_btn.setText("⏹ Arrêter l'API")
+            self._api_status_label.setText(f"Statut : Active sur {url}")
+            self._api_status_label.setStyleSheet("color: #16A34A; font-size: 8pt; font-weight: bold;")
+            log.info("API REST démarrée", url=url)
+
+    def _open_api_docs(self) -> None:
+        import webbrowser
+        port = self._api_port.value()
+        webbrowser.open(f"http://127.0.0.1:{port}/docs")
+
+    # ── Base de données ──────────────────────────────────────────────────
 
     def _test_db(self) -> None:
         from app.storage.database import check_db_connection
@@ -332,52 +488,36 @@ class SettingsView(QScrollArea):
         if ok:
             QMessageBox.information(self, "Connexion DB", "✓ Connexion à la base réussie.")
         else:
-            QMessageBox.critical(self, "Connexion DB", "✗ Impossible de se connecter à la base.")
-
-    def _test_proxy(self) -> None:
-        proxy = self._proxy_input.text().strip()
-        if not proxy:
-            QMessageBox.information(self, "Proxy", "Aucun proxy configuré.")
-            return
-        try:
-            import httpx
-            with httpx.Client(proxies={"http://": proxy, "https://": proxy}, timeout=10) as c:
-                r = c.get("https://httpbin.org/ip")
-                QMessageBox.information(
-                    self, "Proxy OK", f"✓ Proxy fonctionnel\nIP publique : {r.json().get('origin', '?')}"
-                )
-        except Exception as exc:
-            QMessageBox.critical(self, "Erreur proxy", f"✗ Proxy inaccessible :\n{exc}")
+            QMessageBox.critical(self, "Connexion DB", "✗ Impossible de se connecter.")
 
     def _backup_db(self) -> None:
         from app.storage.database import get_active_db_url
         url = get_active_db_url() or ""
         if not url.startswith("sqlite:///"):
-            QMessageBox.warning(self, "Sauvegarde", "Sauvegarde uniquement pour SQLite.")
+            QMessageBox.warning(self, "Sauvegarde", "SQLite uniquement.")
             return
         db_path = Path(url.replace("sqlite:///", ""))
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = db_path.parent / f"shapewear_backup_{ts}.db"
-        shutil.copy2(db_path, backup_path)
-        QMessageBox.information(self, "Sauvegarde OK", f"Base sauvegardée :\n{backup_path}")
+        backup = db_path.parent / f"shapewear_backup_{ts}.db"
+        shutil.copy2(db_path, backup)
+        QMessageBox.information(self, "Sauvegarde OK", f"Sauvegardé :\n{backup}")
 
     def _restore_db(self) -> None:
         file, _ = QFileDialog.getOpenFileName(
             self, "Choisir une sauvegarde", str(settings.DATA_DIR),
-            "SQLite (*.db);;Tous les fichiers (*.*)"
+            "SQLite (*.db)"
         )
         if not file:
             return
         reply = QMessageBox.question(
             self, "Restauration",
-            "Remplacer la base actuelle par cette sauvegarde ?",
+            "Remplacer la base actuelle ?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
-        from app.storage.database import get_active_db_url, dispose_engine
-        url = get_active_db_url() or ""
-        db_path = Path(url.replace("sqlite:///", ""))
+        from app.storage.database import dispose_engine, get_active_db_url
+        db_path = Path((get_active_db_url() or "").replace("sqlite:///", ""))
         dispose_engine()
         shutil.copy2(file, db_path)
         QMessageBox.information(self, "Restauration OK", "Base restaurée. Redémarrez l'application.")
@@ -386,44 +526,20 @@ class SettingsView(QScrollArea):
         days = self._purge_days.value()
         reply = QMessageBox.question(
             self, "Purge",
-            f"Supprimer tous les snapshots de plus de {days} jours ?\n"
-            "Cette action est irréversible.",
+            f"Supprimer les snapshots de plus de {days} jours ?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
-        try:
-            from app.storage.database import get_db
-            from app.storage.models import ProductSnapshot
-            from datetime import timedelta
-            cutoff = datetime.utcnow() - timedelta(days=days)
-            with get_db() as db:
-                deleted = db.query(ProductSnapshot).filter(
-                    ProductSnapshot.crawled_at < cutoff
-                ).delete()
-            QMessageBox.information(
-                self, "Purge terminée", f"{deleted} snapshot(s) supprimé(s)."
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Erreur purge", str(exc))
-
-    def _browse_export_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(
-            self, "Choisir le répertoire d'export", str(settings.EXPORT_DIR)
-        )
-        if d:
-            self._export_dir_input.setText(d)
-            self._mark_unsaved()
-
-    def _open_export_dir(self) -> None:
-        import subprocess, sys
-        path = self._export_dir_input.text()
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", path])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
+        from app.storage.database import get_db
+        from app.storage.models import ProductSnapshot
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with get_db() as db:
+            deleted = db.query(ProductSnapshot).filter(
+                ProductSnapshot.crawled_at < cutoff
+            ).delete()
+        QMessageBox.information(self, "Purge", f"{deleted} snapshot(s) supprimés.")
 
     def _open_log_dir(self) -> None:
         import subprocess, sys
@@ -435,32 +551,74 @@ class SettingsView(QScrollArea):
         else:
             subprocess.Popen(["xdg-open", path])
 
-    def _save_settings(self) -> None:
+    # ── Sauvegarde ───────────────────────────────────────────────────────
+
+    def _save_all(self) -> None:
+        proxies = [
+            self._proxy_list_widget.item(i).text()
+            for i in range(self._proxy_list_widget.count())
+        ]
+        mode_map = {0: "manual", 1: "daily", 2: "weekly"}
+        t = self._sched_time.time()
+
         data = {
-            "MAX_WORKERS":  self._workers_spin.value(),
-            "LOG_LEVEL":    self._log_level.currentText(),
-            "PROXY_URL":    self._proxy_input.text().strip(),
-            "EXPORT_DIR":   self._export_dir_input.text(),
+            "MAX_WORKERS":       self._workers.value(),
+            "LOG_LEVEL":         self._log_level.currentText(),
+            "PROXY_LIST":        proxies,
+            "PROXY_STRATEGY":    self._proxy_strategy.currentText(),
+            "schedule": {
+                "mode":    mode_map.get(self._sched_mode.currentIndex(), "manual"),
+                "hour":    t.hour(),
+                "minute":  t.minute(),
+                "weekday": self._sched_weekday.currentIndex(),
+                "enabled": self._sched_enabled.isChecked(),
+                "brands":  None,
+            },
         }
+
         settings_path = PROJECT_ROOT / "settings.json"
+        # Fusionner avec les settings existants
+        existing = {}
+        if settings_path.exists():
+            try:
+                with open(settings_path, encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
+        existing.update(data)
+
         with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        self._unsaved = False
-        log.info("Paramètres sauvegardés", path=str(settings_path))
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+
+        # Appliquer la config du scheduler
+        try:
+            from app.workflow.scheduler import Scheduler
+            sched = Scheduler()
+            sched.configure(
+                mode=data["schedule"]["mode"],
+                hour=t.hour(),
+                minute=t.minute(),
+                weekday=self._sched_weekday.currentIndex(),
+                enabled=self._sched_enabled.isChecked(),
+            )
+        except Exception as exc:
+            log.warning("Impossible de configurer le scheduler", error=str(exc))
+
+        log.info("Paramètres Phase 3 sauvegardés")
         QMessageBox.information(
-            self, "Sauvegardé", "Paramètres enregistrés.\n"
-            "Certains changements nécessitent un redémarrage."
+            self, "Sauvegardé",
+            "Paramètres enregistrés.\nCertains changements nécessitent un redémarrage."
         )
 
     def _reset_settings(self) -> None:
         reply = QMessageBox.question(
             self, "Réinitialiser",
-            "Supprimer le fichier settings.json et revenir aux valeurs par défaut ?",
+            "Supprimer settings.json et revenir aux valeurs par défaut ?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
-        settings_path = PROJECT_ROOT / "settings.json"
-        if settings_path.exists():
-            settings_path.unlink()
-        QMessageBox.information(self, "Réinitialisation", "Paramètres réinitialisés. Redémarrez l'application.")
+        p = PROJECT_ROOT / "settings.json"
+        if p.exists():
+            p.unlink()
+        QMessageBox.information(self, "Réinitialisé", "Redémarrez l'application.")
