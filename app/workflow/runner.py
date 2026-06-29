@@ -5,6 +5,12 @@ Changements v3 :
   - Injection de max_workers dans ScrapingEngine
   - Appel de Enricher.compute() après chaque snapshot sauvegardé
   - Métriques enrichies loggées et disponibles pour l'export
+
+Bugfix v3.1 :
+  - crawled_ids utilise raw.external_id (cohérent avec active_before qui lit p.external_id)
+    L'ancien code utilisait raw.extra.get("handle") qui est le slug Shopify textuel,
+    incompatible avec l'external_id numérique stocké en base → tous les produits
+    étaient détectés comme supprimés à chaque session.
 """
 from __future__ import annotations
 
@@ -106,6 +112,10 @@ class WorkflowRunner:
                     for p in ProductRepository(db).find_active_by_brand(brand_id)
                 ]
 
+            # BUG FIX v3.1 : on utilise raw.external_id (ID numérique Shopify, ex: "7234567890123")
+            # et non raw.extra.get("handle") (slug textuel, ex: "assets-the-perfect-bra").
+            # active_before contient aussi des external_id → les deux listes sont maintenant
+            # comparables, ce qui évite de détecter tous les produits comme "supprimés".
             crawled_ids: list[str] = []
             engine = ScrapingEngine(
                 connector,
@@ -118,7 +128,7 @@ class WorkflowRunner:
                     break
                 try:
                     self._process_product(raw, result, brand_id)
-                    crawled_ids.append(raw.extra.get("handle") or raw.external_id)
+                    crawled_ids.append(raw.external_id)  # FIX: était raw.extra.get("handle") or raw.external_id
                 except Exception as exc:
                     result.errors += 1
                     log.error(

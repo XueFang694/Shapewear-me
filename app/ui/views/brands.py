@@ -44,7 +44,8 @@ _ENGINE_LABELS = {
 
 class ConnectionWorker(QObject):
     """Teste la connexion dans un thread séparé."""
-    result = Signal(str, str)   # (slug, status)
+    result   = Signal(str, str)   # (slug, status)
+    finished = Signal()           # signal de fin propre pour le thread
 
     def __init__(self, slug: str) -> None:
         super().__init__()
@@ -58,6 +59,8 @@ class ConnectionWorker(QObject):
             self.result.emit(self._slug, status.value)
         except Exception as exc:
             self.result.emit(self._slug, f"error: {exc}")
+        finally:
+            self.finished.emit()
 
 
 class ConnectorCard(QFrame):
@@ -285,11 +288,20 @@ class BrandsView(QWidget):
         worker = ConnectionWorker(slug)
         thread = QThread()
         worker.moveToThread(thread)
+
+        # FIX: connexions propres — on utilise worker.finished pour arrêter le thread,
+        # pas un lambda sur result qui pouvait ne pas se déclencher correctement.
         thread.started.connect(worker.run)
         worker.result.connect(self._on_test_result)
-        worker.result.connect(lambda *_: thread.quit())
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+
         self._threads.append(thread)
+        # Nettoyer les threads terminés de la liste
+        self._threads = [t for t in self._threads if t.isRunning()]
+        self._threads.append(thread)
+
         thread.start()
 
     def _test_all(self) -> None:
