@@ -460,8 +460,12 @@ class MainWindow(QMainWindow):
     def _on_run_clicked(self) -> None:
         if self._is_running:
             return
-        # Lancer toutes les marques disponibles (ou SPANX en mode rapide)
-        self._start_crawl(brand_slugs=["spanx"])
+        try:
+            from app.connectors.registry import ConnectorRegistry
+            brand_slugs = ConnectorRegistry().list_connectors()
+        except Exception:
+            brand_slugs = ["spanx", "skims", "honeylove", "shapermint"]
+        self._start_crawl(brand_slugs=brand_slugs)
 
     def _start_crawl(self, brand_slugs: list[str]) -> None:
         """Lance un crawl avec la liste de marques donnée."""

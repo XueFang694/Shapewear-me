@@ -13,8 +13,6 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -44,8 +42,9 @@ _ENGINE_LABELS = {
 
 class ConnectionWorker(QObject):
     """Teste la connexion dans un thread séparé."""
-    result   = Signal(str, str)   # (slug, status)
-    finished = Signal()           # signal de fin propre pour le thread
+
+    result   = Signal(str, str)  # (slug, status)
+    finished = Signal()
 
     def __init__(self, slug: str) -> None:
         super().__init__()
@@ -60,13 +59,14 @@ class ConnectionWorker(QObject):
         except Exception as exc:
             self.result.emit(self._slug, f"error: {exc}")
         finally:
+            # Toujours émettre finished pour libérer le thread proprement
             self.finished.emit()
 
 
 class ConnectorCard(QFrame):
     """Carte d'un connecteur avec ses métadonnées et actions."""
 
-    test_requested = Signal(str)   # slug
+    test_requested = Signal(str)  # slug
 
     def __init__(self, slug: str, meta: dict, stats: dict, parent=None) -> None:
         super().__init__(parent)
@@ -130,7 +130,6 @@ class ConnectorCard(QFrame):
         btn_test.setStyleSheet(
             f"QPushButton {{ background: {color}; color: white; border-radius: 6px; "
             f"padding: 4px 14px; font-size: 9pt; }}"
-            f"QPushButton:hover {{ opacity: 0.9; }}"
         )
         btn_test.clicked.connect(lambda: self.test_requested.emit(slug))
         btn_row.addWidget(btn_test)
@@ -144,9 +143,16 @@ class ConnectorCard(QFrame):
             "blocked": ("🟡  Bloqué",   "#D97706"),
             "timeout": ("🟠  Timeout",  "#EA580C"),
         }
-        label, color = color_map.get(status, (f"⚪  {status}", "#64748B"))
+        # Gestion des statuts "error: ..." non listés
+        if status not in color_map:
+            label = f"⚪  {status[:30]}"
+            color = "#64748B"
+        else:
+            label, color = color_map[status]
         self._status_label.setText(label)
-        self._status_label.setStyleSheet(f"color: {color}; border: none; font-size: 9pt; font-weight: bold;")
+        self._status_label.setStyleSheet(
+            f"color: {color}; border: none; font-size: 9pt; font-weight: bold;"
+        )
 
     def set_testing(self) -> None:
         self._status_label.setText("⏳  Test en cours…")
@@ -159,7 +165,8 @@ class BrandsView(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._cards: dict[str, ConnectorCard] = {}
-        self._threads: list[QThread] = []
+        # Garder des références fortes sur (worker, thread) pour éviter GC prématuré
+        self._active_tests: list[tuple] = []
         self._setup_ui()
 
     # ── Construction ─────────────────────────────────────────────────────
@@ -236,7 +243,6 @@ class BrandsView(QWidget):
         try:
             with get_db() as db:
                 brands = db.query(Brand).all()
-                bmap   = {b.slug: b for b in brands}
                 snap_repo = SnapshotRepository(db)
                 for b in brands:
                     products  = db.query(Product).filter_by(brand_id=b.id).all()
@@ -244,7 +250,10 @@ class BrandsView(QWidget):
                     db_stats[b.slug] = {
                         "active":       sum(1 for p in products if p.is_active),
                         "best_sellers": sum(1 for p in products if p.is_best_seller),
-                        "on_sale":      sum(1 for p in products if snapshots.get(p.id) and snapshots[p.id].on_sale),
+                        "on_sale":      sum(
+                            1 for p in products
+                            if snapshots.get(p.id) and snapshots[p.id].on_sale
+                        ),
                         "removed":      sum(1 for p in products if not p.is_active),
                     }
         except Exception as exc:
@@ -289,23 +298,33 @@ class BrandsView(QWidget):
         thread = QThread()
         worker.moveToThread(thread)
 
-        # FIX: connexions propres — on utilise worker.finished pour arrêter le thread,
-        # pas un lambda sur result qui pouvait ne pas se déclencher correctement.
-        thread.started.connect(worker.run)
-        worker.result.connect(self._on_test_result)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        # Garder une référence forte sur worker ET thread
+        pair = (worker, thread)
+        self._active_tests.append(pair)
 
-        self._threads.append(thread)
-        # Nettoyer les threads terminés de la liste
-        self._threads = [t for t in self._threads if t.isRunning()]
-        self._threads.append(thread)
+        def _on_result(s: str, status: str) -> None:
+            self._on_test_result(s, status)
+
+        def _cleanup() -> None:
+            # Retirer la paire de la liste après fin du thread
+            try:
+                self._active_tests.remove(pair)
+            except ValueError:
+                pass
+
+        thread.started.connect(worker.run)
+        worker.result.connect(_on_result)
+        # finished du worker → quit du thread
+        worker.finished.connect(thread.quit)
+        # Après que le thread est bien arrêté → nettoyage
+        thread.finished.connect(_cleanup)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
 
         thread.start()
 
     def _test_all(self) -> None:
-        for slug in self._cards:
+        for slug in list(self._cards.keys()):
             self._test_single(slug)
 
     def _on_test_result(self, slug: str, status: str) -> None:
