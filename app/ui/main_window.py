@@ -48,10 +48,10 @@ log = get_logger(__name__)
 class CrawlWorker(QObject):
     """Exécute le crawl dans un thread séparé."""
 
-    finished    = Signal(list)    # list[RunResult]
-    error       = Signal(str)
-    log_message = Signal(str, str)  # (level, message)
-    progress    = Signal(int, int)  # (current, total)
+    finished           = Signal(list)    # list[RunResult]
+    error              = Signal(str)
+    log_message        = Signal(str, str)  # (level, message)
+    _progress_received = Signal(str, int, int)  # (label, current, total)
 
     def __init__(self, brand_slugs: list[str]) -> None:
         super().__init__()
@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
     """Fenêtre principale de l'application Market Intelligence — Phase 2."""
 
     # Signaux internes pour thread-safety
+    _log_received      = Signal(str, str)
     _progress_received = Signal(str, int, int)  # (label, current, total)
 
     def __init__(self) -> None:
