@@ -1,11 +1,13 @@
 """
-Point d'entrée de l'application Market Intelligence Platform — Shapewear US.
+Point d'entrée de l'application Market Intelligence Platform.
 
 Lancement :
     python main.py
 
 En mode ligne de commande (sans UI) :
     python main.py --no-ui --brand spanx
+    python main.py --no-ui --brand wacoal --market us
+    python main.py --no-ui --market fr --export
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import sys
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Market Intelligence Platform — Shapewear US",
+        description="Market Intelligence Platform",
     )
     parser.add_argument(
         "--no-ui",
@@ -27,7 +29,17 @@ def main() -> int:
         nargs="+",
         default=None,
         metavar="SLUG",
-        help="Marque(s) à analyser (ex : spanx skims). Par défaut : toutes.",
+        help="Marque(s) à analyser (ex : spanx skims wacoal). Par défaut : toutes.",
+    )
+    parser.add_argument(
+        "--market",
+        default=None,
+        metavar="SLUG",
+        help=(
+            "Marché géographique actif (ex : us, fr, it, es, gb, zh). "
+            "Surcharge MARKET défini dans .env/settings.json pour cette exécution. "
+            "Voir app/core/market.py pour la liste complète."
+        ),
     )
     parser.add_argument(
         "--export",
@@ -35,6 +47,13 @@ def main() -> int:
         help="Exporter en CSV après le crawl (mode --no-ui uniquement)",
     )
     args = parser.parse_args()
+
+    # Surcharger le marché AVANT tout import qui lirait settings (Settings()
+    # est instancié au chargement du module app.core.config). On le fait via
+    # la variable d'environnement, lue nativement par pydantic-settings.
+    if args.market:
+        import os
+        os.environ["MARKET"] = args.market.lower().strip()
 
     if args.no_ui:
         return _run_cli(brand_slugs=args.brand, export_csv=args.export)
@@ -63,11 +82,13 @@ def _run_cli(
 ) -> int:
     """Lance le crawl en mode CLI (sans interface graphique)."""
     from app.workflow.runner import WorkflowRunner
+    from app.core.config import settings
     from app.core.logger import get_logger
 
     log = get_logger(__name__)
 
     print("=== Market Intelligence Platform — Mode CLI ===")
+    print(f"Marché  : {settings.MARKET.upper()}")
     print(f"Marques : {brand_slugs or 'toutes'}")
     print()
 

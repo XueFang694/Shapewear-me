@@ -32,6 +32,7 @@ _BRAND_COLORS = {
     "skims":      "#C8A882",
     "honeylove":  "#C0392B",
     "shapermint": "#27AE60",
+    "wacoal": "#3727AE",
 }
 _DEFAULT_COLOR = "#2C3E50"
 

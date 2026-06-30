@@ -1,9 +1,9 @@
 """
 Vue Paramètres Phase 3 — Étend la Phase 2 avec :
+  - Sélecteur de marché géographique (US, FR, IT, ES, ZH, GB, …)
   - Configuration du planificateur (mode, heure, jour)
   - Gestion du pool de proxies rotatifs
   - Serveur API REST (activation, port, statut)
-  - Lien vers la vue d'audit de classification
   - Tous les paramètres Phase 2 conservés
 """
 from __future__ import annotations
@@ -41,6 +41,7 @@ from PySide6.QtCore import QTime
 
 from app.core.config import settings, PROJECT_ROOT
 from app.core.logger import get_logger
+from app.core.market import list_markets
 
 log = get_logger(__name__)
 
@@ -81,7 +82,7 @@ def _row(label: str, widget: QWidget, desc: str = "") -> QWidget:
 
 
 class SettingsView(QScrollArea):
-    """Vue Paramètres complète Phase 3."""
+    """Vue Paramètres complète Phase 3 avec support marché géographique."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -101,12 +102,58 @@ class SettingsView(QScrollArea):
         title.setStyleSheet("color: #1E293B;")
         main.addWidget(title)
 
-        subtitle = QLabel("Configuration de la plateforme Market Intelligence — Phase 3")
+        subtitle = QLabel("Configuration de la plateforme Market Intelligence")
         subtitle.setStyleSheet("color: #64748B; font-size: 10pt;")
         main.addWidget(subtitle)
 
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet("color: #E2E8F0;"); main.addWidget(sep)
+
+        # ── MARCHÉ GÉOGRAPHIQUE ───────────────────────────────────────────
+        main.addWidget(SectionTitle("🌍  Marché géographique"))
+        market_grp = _make_group()
+        market_l = QVBoxLayout(market_grp)
+
+        market_info = QLabel(
+            "Le marché actif détermine la devise, les formats de date et de prix dans "
+            "les exports, ainsi que les en-têtes HTTP envoyés aux sites cibles."
+        )
+        market_info.setWordWrap(True)
+        market_info.setStyleSheet("color: #64748B; font-size: 9pt;")
+        market_l.addWidget(market_info)
+
+        # Combo de sélection du marché
+        self._market_combo = QComboBox()
+        self._market_combo.setFixedWidth(300)
+        self._market_combo.setStyleSheet(
+            "QComboBox { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; }"
+        )
+        for m in list_markets():
+            flag = self._market_flag(m.slug)
+            self._market_combo.addItem(
+                f"{flag}  {m.name} ({m.slug.upper()})  —  {m.currency}",
+                m.slug,
+            )
+        # Sélectionner le marché actif
+        current_market = getattr(settings, "MARKET", "us")
+        for i in range(self._market_combo.count()):
+            if self._market_combo.itemData(i) == current_market:
+                self._market_combo.setCurrentIndex(i)
+                break
+        self._market_combo.currentIndexChanged.connect(self._on_market_changed)
+        market_l.addWidget(_row("Marché actif", self._market_combo))
+
+        # Aperçu du marché sélectionné
+        self._market_preview = QLabel()
+        self._market_preview.setStyleSheet(
+            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; "
+            "padding: 8px 12px; color: #475569; font-size: 8pt; font-family: monospace;"
+        )
+        self._market_preview.setWordWrap(True)
+        market_l.addWidget(self._market_preview)
+        self._refresh_market_preview()
+
+        main.addWidget(market_grp)
 
         # ── SCRAPING ──────────────────────────────────────────────────────
         main.addWidget(SectionTitle("🕷️  Scraping"))
@@ -166,18 +213,15 @@ class SettingsView(QScrollArea):
         self._sched_weekday_row.hide()
         sched_l.addWidget(self._sched_weekday_row)
 
-        # Statut planificateur
         self._sched_status_label = QLabel("Statut : —")
         self._sched_status_label.setStyleSheet("color: #64748B; font-size: 8pt; padding-top: 4px;")
         sched_l.addWidget(self._sched_status_label)
 
         self._load_scheduler_config()
         self._refresh_scheduler_status()
-        # Rafraîchir le statut toutes les 30s
         timer = QTimer(self)
         timer.timeout.connect(self._refresh_scheduler_status)
         timer.start(30_000)
-
         main.addWidget(sched_grp)
 
         # ── PROXIES ───────────────────────────────────────────────────────
@@ -188,7 +232,6 @@ class SettingsView(QScrollArea):
         proxy_l.addWidget(QLabel(
             "Entrez un proxy par ligne (http://user:pass@ip:port ou socks5://...) :"
         ))
-
         self._proxy_list_widget = QListWidget()
         self._proxy_list_widget.setMaximumHeight(120)
         self._proxy_list_widget.setStyleSheet(
@@ -206,15 +249,13 @@ class SettingsView(QScrollArea):
         proxy_edit_row.addWidget(self._proxy_input, 1)
         btn_add_proxy = QPushButton("+ Ajouter")
         btn_add_proxy.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
-            "padding: 4px 10px; font-size: 8pt; }"
+            "QPushButton { background: #2563EB; color: white; border-radius: 6px; padding: 4px 10px; font-size: 8pt; }"
         )
         btn_add_proxy.clicked.connect(self._add_proxy)
         proxy_edit_row.addWidget(btn_add_proxy)
         btn_remove_proxy = QPushButton("Supprimer")
         btn_remove_proxy.setStyleSheet(
-            "QPushButton { background: #DC2626; color: white; border-radius: 6px; "
-            "padding: 4px 10px; font-size: 8pt; }"
+            "QPushButton { background: #DC2626; color: white; border-radius: 6px; padding: 4px 10px; font-size: 8pt; }"
         )
         btn_remove_proxy.clicked.connect(self._remove_proxy)
         proxy_edit_row.addWidget(btn_remove_proxy)
@@ -228,19 +269,11 @@ class SettingsView(QScrollArea):
         self._proxy_strategy.setFixedWidth(130)
         proxy_opts_row.addWidget(self._proxy_strategy)
         proxy_opts_row.addStretch()
-        btn_test_proxies = QPushButton("🔍 Tester tous les proxies")
-        btn_test_proxies.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; }"
-        )
-        btn_test_proxies.clicked.connect(self._test_proxies)
-        proxy_opts_row.addWidget(btn_test_proxies)
         proxy_opts_w = QWidget(); proxy_opts_w.setLayout(proxy_opts_row)
         proxy_l.addWidget(proxy_opts_w)
-
         self._proxy_stats_label = QLabel("")
         self._proxy_stats_label.setStyleSheet("color: #64748B; font-size: 8pt;")
         proxy_l.addWidget(self._proxy_stats_label)
-
         self._load_proxy_config()
         main.addWidget(proxy_grp)
 
@@ -248,43 +281,33 @@ class SettingsView(QScrollArea):
         main.addWidget(SectionTitle("🔌  API REST Locale"))
         api_grp = _make_group()
         api_l = QVBoxLayout(api_grp)
-
         api_info = QLabel(
             "L'API REST expose les données via HTTP pour les intégrations externes "
             "(Power BI, Google Sheets, scripts Python, etc.)."
         )
-        api_info.setWordWrap(True)
-        api_info.setStyleSheet("color: #64748B; font-size: 9pt;")
+        api_info.setWordWrap(True); api_info.setStyleSheet("color: #64748B; font-size: 9pt;")
         api_l.addWidget(api_info)
-
         api_row = QHBoxLayout()
         self._api_port = QSpinBox()
-        self._api_port.setRange(1024, 65535)
-        self._api_port.setValue(8765)
+        self._api_port.setRange(1024, 65535); self._api_port.setValue(8765)
         self._api_port.setFixedWidth(90)
-        api_row.addWidget(QLabel("Port :"))
-        api_row.addWidget(self._api_port)
+        api_row.addWidget(QLabel("Port :")); api_row.addWidget(self._api_port)
         api_row.addStretch()
-
         self._api_btn = QPushButton("▶ Démarrer l'API")
         self._api_btn.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
-            "padding: 5px 14px; font-weight: bold; }"
+            "QPushButton { background: #2563EB; color: white; border-radius: 6px; padding: 5px 14px; font-weight: bold; }"
             "QPushButton:hover { background: #1D4ED8; }"
         )
         self._api_btn.clicked.connect(self._toggle_api)
         api_row.addWidget(self._api_btn)
-
         btn_open_docs = QPushButton("📖 Ouvrir /docs")
         btn_open_docs.setStyleSheet(
             "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 5px 10px; }"
         )
         btn_open_docs.clicked.connect(self._open_api_docs)
         api_row.addWidget(btn_open_docs)
-
         api_row_w = QWidget(); api_row_w.setLayout(api_row)
         api_l.addWidget(api_row_w)
-
         self._api_status_label = QLabel("Statut : Arrêtée")
         self._api_status_label.setStyleSheet("color: #64748B; font-size: 8pt;")
         api_l.addWidget(self._api_status_label)
@@ -294,7 +317,6 @@ class SettingsView(QScrollArea):
         main.addWidget(SectionTitle("🗄️  Base de données"))
         db_grp = _make_group()
         db_l = QVBoxLayout(db_grp)
-
         from app.storage.database import get_active_db_url
         active_url = get_active_db_url() or settings.DATABASE_URL
         db_path_lbl = QLabel(active_url.replace("sqlite:///", ""))
@@ -303,21 +325,18 @@ class SettingsView(QScrollArea):
             "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 4px; padding: 4px 8px;"
         )
         db_path_lbl.setWordWrap(True)
-        db_l.addWidget(QLabel("Chemin actuel :"))
-        db_l.addWidget(db_path_lbl)
-
+        db_l.addWidget(QLabel("Chemin actuel :")); db_l.addWidget(db_path_lbl)
         db_btn_row = QHBoxLayout()
         for label, slot, style in [
-            ("✓ Tester",    self._test_db,    "border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px;"),
-            ("💾 Sauvegarder", self._backup_db, "background: #2563EB; color: white; border-radius: 6px; padding: 4px 10px;"),
-            ("↺ Restaurer",  self._restore_db, "background: #D97706; color: white; border-radius: 6px; padding: 4px 10px;"),
+            ("✓ Tester",       self._test_db,    "border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px;"),
+            ("💾 Sauvegarder", self._backup_db,  "background: #2563EB; color: white; border-radius: 6px; padding: 4px 10px;"),
+            ("↺ Restaurer",    self._restore_db, "background: #D97706; color: white; border-radius: 6px; padding: 4px 10px;"),
         ]:
             btn = QPushButton(label)
             btn.setStyleSheet(f"QPushButton {{ {style} }}")
             btn.clicked.connect(slot)
             db_btn_row.addWidget(btn)
         db_btn_row.addStretch()
-
         purge_row = QHBoxLayout()
         purge_row.addWidget(QLabel("Purger les snapshots > "))
         self._purge_days = QSpinBox()
@@ -329,9 +348,7 @@ class SettingsView(QScrollArea):
             "QPushButton { background: #DC2626; color: white; border-radius: 6px; padding: 4px 8px; }"
         )
         btn_purge.clicked.connect(self._purge_snapshots)
-        purge_row.addWidget(btn_purge)
-        purge_row.addStretch()
-
+        purge_row.addWidget(btn_purge); purge_row.addStretch()
         db_btn_w = QWidget(); db_btn_w.setLayout(db_btn_row)
         db_l.addWidget(db_btn_w)
         purge_w = QWidget(); purge_w.setLayout(purge_row)
@@ -377,6 +394,39 @@ class SettingsView(QScrollArea):
         action_w = QWidget(); action_w.setLayout(action_row)
         main.addWidget(action_w)
         main.addStretch()
+
+    # ── Marché ───────────────────────────────────────────────────────────
+
+    def _on_market_changed(self, _idx: int) -> None:
+        self._refresh_market_preview()
+
+    def _refresh_market_preview(self) -> None:
+        from app.core.market import get_market
+        slug = self._market_combo.currentData() or "us"
+        try:
+            m = get_market(slug)
+            example_price = m.format_price(68.00)
+            example_date  = m.format_date(datetime.now())
+            self._market_preview.setText(
+                f"Locale : {m.locale}   |   Devise : {m.currency} ({m.currency_symbol})   |   "
+                f"Exemple prix : {example_price}   |   Exemple date : {example_date}\n"
+                f"Accept-Language : {m.accept_language}"
+            )
+        except Exception:
+            self._market_preview.setText("—")
+
+    @staticmethod
+    def _market_flag(slug: str) -> str:
+        """Emoji drapeau approximatif pour affichage dans le combo."""
+        flags = {
+            "us": "🇺🇸", "fr": "🇫🇷", "de": "🇩🇪", "it": "🇮🇹",
+            "es": "🇪🇸", "gb": "🇬🇧", "nl": "🇳🇱", "be": "🇧🇪",
+            "ch": "🇨🇭", "pt": "🇵🇹", "pl": "🇵🇱", "se": "🇸🇪",
+            "no": "🇳🇴", "dk": "🇩🇰", "ca": "🇨🇦", "mx": "🇲🇽",
+            "br": "🇧🇷", "au": "🇦🇺", "in": "🇮🇳", "zh": "🇨🇳",
+            "tw": "🇹🇼", "jp": "🇯🇵", "kr": "🇰🇷",
+        }
+        return flags.get(slug.lower(), "🌐")
 
     # ── Planificateur ─────────────────────────────────────────────────────
 
@@ -442,43 +492,26 @@ class SettingsView(QScrollArea):
         if row >= 0:
             self._proxy_list_widget.takeItem(row)
 
-    def _test_proxies(self) -> None:
-        from app.scraping.proxy_manager import ProxyManager
-        proxies = [
-            self._proxy_list_widget.item(i).text()
-            for i in range(self._proxy_list_widget.count())
-        ]
-        if not proxies:
-            QMessageBox.information(self, "Proxies", "Aucun proxy configuré.")
-            return
-        manager = ProxyManager(proxy_list=proxies, validate_on_start=True)
-        summary = manager.get_summary()
-        self._proxy_stats_label.setText(
-            f"Résultat : {summary['available']} OK, "
-            f"{summary['blacklisted']} invalides sur {summary['total']}"
-        )
-
     # ── API REST ──────────────────────────────────────────────────────────
 
     def _toggle_api(self) -> None:
-        from app.api.server import start_api_server, stop_api_server, is_api_running
-        if is_api_running():
-            stop_api_server()
-            self._api_btn.setText("▶ Démarrer l'API")
-            self._api_status_label.setText("Statut : Arrêtée")
-            self._api_status_label.setStyleSheet("color: #64748B; font-size: 8pt;")
-        else:
-            port = self._api_port.value()
-            url  = start_api_server(port=port)
-            self._api_btn.setText("⏹ Arrêter l'API")
-            self._api_status_label.setText(f"Statut : Active sur {url}")
-            self._api_status_label.setStyleSheet("color: #16A34A; font-size: 8pt; font-weight: bold;")
-            log.info("API REST démarrée", url=url)
+        try:
+            from app.api.server import start_api_server, stop_api_server, is_api_running
+            if is_api_running():
+                stop_api_server()
+                self._api_btn.setText("▶ Démarrer l'API")
+                self._api_status_label.setText("Statut : Arrêtée")
+            else:
+                port = self._api_port.value()
+                url  = start_api_server(port=port)
+                self._api_btn.setText("⏹ Arrêter l'API")
+                self._api_status_label.setText(f"Statut : Active sur {url}")
+        except ImportError:
+            QMessageBox.information(self, "API REST", "Module app.api.server non disponible.")
 
     def _open_api_docs(self) -> None:
         import webbrowser
-        port = self._api_port.value()
-        webbrowser.open(f"http://127.0.0.1:{port}/docs")
+        webbrowser.open(f"http://127.0.0.1:{self._api_port.value()}/docs")
 
     # ── Base de données ──────────────────────────────────────────────────
 
@@ -504,14 +537,12 @@ class SettingsView(QScrollArea):
 
     def _restore_db(self) -> None:
         file, _ = QFileDialog.getOpenFileName(
-            self, "Choisir une sauvegarde", str(settings.DATA_DIR),
-            "SQLite (*.db)"
+            self, "Choisir une sauvegarde", str(settings.DATA_DIR), "SQLite (*.db)"
         )
         if not file:
             return
         reply = QMessageBox.question(
-            self, "Restauration",
-            "Remplacer la base actuelle ?",
+            self, "Restauration", "Remplacer la base actuelle ?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
@@ -561,7 +592,10 @@ class SettingsView(QScrollArea):
         mode_map = {0: "manual", 1: "daily", 2: "weekly"}
         t = self._sched_time.time()
 
+        selected_market = self._market_combo.currentData() or "us"
+
         data = {
+            "MARKET":            selected_market,
             "MAX_WORKERS":       self._workers.value(),
             "LOG_LEVEL":         self._log_level.currentText(),
             "PROXY_LIST":        proxies,
@@ -577,7 +611,6 @@ class SettingsView(QScrollArea):
         }
 
         settings_path = PROJECT_ROOT / "settings.json"
-        # Fusionner avec les settings existants
         existing = {}
         if settings_path.exists():
             try:
@@ -586,11 +619,9 @@ class SettingsView(QScrollArea):
             except Exception:
                 pass
         existing.update(data)
-
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(existing, f, indent=2, ensure_ascii=False)
 
-        # Appliquer la config du scheduler
         try:
             from app.workflow.scheduler import Scheduler
             sched = Scheduler()
@@ -604,10 +635,11 @@ class SettingsView(QScrollArea):
         except Exception as exc:
             log.warning("Impossible de configurer le scheduler", error=str(exc))
 
-        log.info("Paramètres Phase 3 sauvegardés")
+        log.info("Paramètres sauvegardés", market=selected_market)
         QMessageBox.information(
             self, "Sauvegardé",
-            "Paramètres enregistrés.\nCertains changements nécessitent un redémarrage."
+            f"Paramètres enregistrés (marché : {selected_market.upper()}).\n"
+            "Certains changements nécessitent un redémarrage."
         )
 
     def _reset_settings(self) -> None:

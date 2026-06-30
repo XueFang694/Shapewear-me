@@ -1,10 +1,12 @@
 """
-CsvExporter v3 — 1 ligne par variante (couleur × taille).
+CsvExporter v4 — support multi-marché.
 
-Changements v3 :
-  - Suppression de la colonne on_sale
-  - Renommage des colonnes variant_* pour clarté
-  - Colonnes matériaux corrigées
+Changements v4 :
+  - Nouvelle colonne "market" (slug du marché actif)
+  - Formatage des prix selon les conventions du marché (format_price)
+  - Formatage des dates selon le marché (format_date)
+  - Suppression de la colonne on_sale (inchangé vs v3)
+  - Rétrocompatible : si market = "us", comportement identique à v3
 """
 from __future__ import annotations
 
@@ -15,10 +17,14 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.market import MarketConfig, get_market
 
 log = get_logger(__name__)
 
 COLUMNS = [
+    # ── Marché ────────────────────────────────────────────────────────────
+    "market",
+
     # ── Identité produit ──────────────────────────────────────────────
     "brand",
     "product_name",
@@ -33,42 +39,38 @@ COLUMNS = [
 
     # ── Prix ──────────────────────────────────────────────────────────
     "price",
-    "original_price",   # prix barré si en promotion
+    "price_formatted",      # prix formaté selon la locale du marché
+    "original_price",
+    "original_price_formatted",
     "currency",
-    "discount_pct",     # % de réduction (vide si pas de promo)
+    "discount_pct",
 
     # ── Disponibilité variante ────────────────────────────────────────
-    # Disponibilité de CETTE taille/couleur spécifique
     "size_color_available",
-    # Dates de première et dernière observation de cette variante
     "size_color_first_seen",
     "size_color_last_seen",
-    # Date à laquelle cette taille/couleur a disparu du site
     "size_color_removed_date",
-    # Date à laquelle cette taille/couleur est revenue en stock
     "size_color_back_in_stock_date",
 
     # ── Cycle de vie produit ──────────────────────────────────────────
     "product_is_active",
     "product_first_seen",
     "product_last_seen",
-    # Date approximative de disparition du produit entier du site
     "product_removed_date",
-    # Date de retour du produit après disparition
     "product_back_in_stock_date",
 
     # ── Best Seller ───────────────────────────────────────────────────
     "is_best_seller",
-    "best_seller_since",     # date d'obtention du badge
-    "best_seller_last_seen", # dernière fois observé avec le badge
+    "best_seller_since",
+    "best_seller_last_seen",
 
     # ── Avis ─────────────────────────────────────────────────────────
     "rating",
     "review_count",
 
     # ── Matériaux ─────────────────────────────────────────────────────
-    "material_main",         # ex: "73% Nylon, 27% Elastane"
-    "material_lining",       # ex: "100% Cotton"
+    "material_main",
+    "material_lining",
     "material_nylon_pct",
     "material_elastane_pct",
     "material_polyester_pct",
@@ -77,7 +79,7 @@ COLUMNS = [
     "material_modal_pct",
     "material_bamboo_pct",
     "material_recycled_pct",
-    "material_raw",          # texte brut complet
+    "material_raw",
 
     # ── Classification ────────────────────────────────────────────────
     "category_raw",
@@ -87,11 +89,7 @@ COLUMNS = [
     "target_zones",
 ]
 
-_DATE_FMT = "%Y-%m-%d %H:%M"
-
-
-def _d(dt) -> str:
-    return dt.strftime(_DATE_FMT) if dt else ""
+_DATE_FMT_ISO = "%Y-%m-%d %H:%M"
 
 
 def _b(v) -> str:
@@ -116,10 +114,24 @@ class CsvExporter:
         brand_slugs: list[str] | None = None,
         session_id: int | None = None,
         filename: str | None = None,
+        market_slug: str | None = None,
     ) -> Path:
+        """
+        Exporte la base en CSV.
+
+        Args:
+            brand_slugs : filtrer par marques (None = toutes).
+            session_id  : suffixe du nom de fichier.
+            filename    : nom de fichier optionnel.
+            market_slug : marché pour le formatage (None = settings.MARKET).
+        """
         from app.storage.database import get_db
         from app.storage.repository import BrandRepository, SnapshotRepository, VariantRepository
         from app.storage.models import Product
+
+        # Marché actif
+        market = self._resolve_market(market_slug)
+        market_slug_val = market.slug
 
         rows: list[dict] = []
 
@@ -138,26 +150,26 @@ class CsvExporter:
                     variants = variant_repo.get_by_product(product.id)
                     comp     = _comp(product.material_composition_json)
 
-                    # Prix produit (depuis dernier snapshot si variante sans prix)
-                    prod_price    = snapshot.price if snapshot else None
-                    prod_orig     = snapshot.original_price if snapshot else None
-                    prod_disc     = snapshot.discount_pct if snapshot else None
-                    currency      = snapshot.currency if snapshot else "USD"
+                    prod_price = snapshot.price if snapshot else None
+                    prod_orig  = snapshot.original_price if snapshot else None
+                    prod_disc  = snapshot.discount_pct if snapshot else None
+                    currency   = snapshot.currency if snapshot else market.currency
 
                     base = {
+                        "market":                 market_slug_val,
                         "brand":                  brand.slug,
                         "product_name":           product.name,
                         "external_id":            product.external_id,
                         "url":                    product.url,
                         "currency":               currency,
                         "product_is_active":      _b(product.is_active),
-                        "product_first_seen":     _d(product.first_seen),
-                        "product_last_seen":      _d(product.last_seen),
-                        "product_removed_date":   _d(product.removed_at),
-                        "product_back_in_stock_date": _d(product.back_in_stock_at),
+                        "product_first_seen":     self._fmt_date(product.first_seen, market),
+                        "product_last_seen":      self._fmt_date(product.last_seen, market),
+                        "product_removed_date":   self._fmt_date(product.removed_at, market),
+                        "product_back_in_stock_date": self._fmt_date(product.back_in_stock_at, market),
                         "is_best_seller":         _b(product.is_best_seller),
-                        "best_seller_since":      _d(product.best_seller_first_seen),
-                        "best_seller_last_seen":  _d(product.best_seller_last_seen),
+                        "best_seller_since":      self._fmt_date(product.best_seller_first_seen, market),
+                        "best_seller_last_seen":  self._fmt_date(product.best_seller_last_seen, market),
                         "rating":                 product.rating or "",
                         "review_count":           product.review_count or "",
                         "material_main":          product.material_main or "",
@@ -180,7 +192,6 @@ class CsvExporter:
 
                     if variants:
                         for v in variants:
-                            # Prix : priorité à la variante, sinon snapshot produit
                             v_price  = v.price if v.price is not None else prod_price
                             v_orig   = v.original_price if v.original_price is not None else prod_orig
                             v_disc   = ""
@@ -196,44 +207,74 @@ class CsvExporter:
                                 "size":                       v.size or "",
                                 "sku":                        v.sku or "",
                                 "price":                      v_price if v_price is not None else "",
+                                "price_formatted":            market.format_price(v_price) if v_price is not None else "",
                                 "original_price":             v_orig if (v.on_sale and v_orig) else "",
+                                "original_price_formatted":   market.format_price(v_orig) if (v.on_sale and v_orig) else "",
                                 "discount_pct":               v_disc,
                                 "size_color_available":       _b(v.available),
-                                "size_color_first_seen":      _d(v.first_seen),
-                                "size_color_last_seen":       _d(v.last_seen),
-                                "size_color_removed_date":    _d(v.removed_at),
-                                "size_color_back_in_stock_date": _d(v.back_in_stock_at),
+                                "size_color_first_seen":      self._fmt_date(v.first_seen, market),
+                                "size_color_last_seen":       self._fmt_date(v.last_seen, market),
+                                "size_color_removed_date":    self._fmt_date(v.removed_at, market),
+                                "size_color_back_in_stock_date": self._fmt_date(v.back_in_stock_at, market),
                             })
                             rows.append(row)
                     else:
                         row = dict(base)
                         row.update({
                             "color": "", "color_canonical": "", "size": "", "sku": "",
-                            "price": prod_price or "", "original_price": prod_orig or "",
-                            "discount_pct": prod_disc or "",
+                            "price":                    prod_price or "",
+                            "price_formatted":          market.format_price(prod_price) if prod_price else "",
+                            "original_price":           prod_orig or "",
+                            "original_price_formatted": market.format_price(prod_orig) if prod_orig else "",
+                            "discount_pct":             prod_disc or "",
                             "size_color_available": "",
                             "size_color_first_seen": "", "size_color_last_seen": "",
                             "size_color_removed_date": "", "size_color_back_in_stock_date": "",
                         })
                         rows.append(row)
 
-        return self._write_csv(rows, session_id=session_id, filename=filename)
+        return self._write_csv(rows, session_id=session_id, filename=filename, market=market)
 
-    def export(self, products, session_id=None, filename=None) -> Path:
-        return self._write_csv(products, session_id=session_id, filename=filename)
+    def export(self, products, session_id=None, filename=None, market_slug=None) -> Path:
+        market = self._resolve_market(market_slug)
+        return self._write_csv(products, session_id=session_id, filename=filename, market=market)
 
-    def _write_csv(self, rows, session_id, filename) -> Path:
+    def _write_csv(self, rows, session_id, filename, market: MarketConfig | None = None) -> Path:
         if not filename:
-            ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
-            sfx    = f"_session{session_id}" if session_id else ""
-            filename = f"export_{ts}{sfx}.csv"
+            ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sfx     = f"_session{session_id}" if session_id else ""
+            mkt_sfx = f"_{market.slug}" if market and market.slug != "us" else ""
+            filename = f"export_{ts}{sfx}{mkt_sfx}.csv"
 
         path = self._export_dir / filename
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore", quoting=csv.QUOTE_ALL)
+            writer = csv.DictWriter(
+                f, fieldnames=COLUMNS, extrasaction="ignore", quoting=csv.QUOTE_ALL
+            )
             writer.writeheader()
             for row in rows:
                 writer.writerow({col: row.get(col, "") for col in COLUMNS})
 
-        log.info("Export CSV créé", path=str(path), rows=len(rows))
+        log.info("Export CSV créé", path=str(path), rows=len(rows), market=market.slug if market else "?")
         return path
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_market(market_slug: str | None) -> MarketConfig:
+        try:
+            return get_market(market_slug)
+        except Exception:
+            try:
+                return get_market()
+            except Exception:
+                from app.core.market import _MARKETS
+                return _MARKETS["us"]
+
+    @staticmethod
+    def _fmt_date(dt, market: MarketConfig) -> str:
+        """Formate une date selon le marché (format court + heure)."""
+        if dt is None:
+            return ""
+        # Format : date locale + heure ISO (toujours utile pour les données brutes)
+        return dt.strftime(market.date_format + " %H:%M")

@@ -1,5 +1,11 @@
 """
-Normalizer v2 — intègre best_seller, matériaux, avis clients.
+Normalizer v3 — intègre best_seller, matériaux, avis clients et support multi-marché.
+
+Nouveautés v3 :
+  - La devise du RawProduct est préservée en priorité (le connecteur la renseigne
+    depuis le MarketConfig de son marché actif).
+  - Fallback sur settings.market_config.currency si la devise est absente.
+  - Aucun autre comportement ne change : la normalisation reste indépendante du marché.
 """
 from __future__ import annotations
 
@@ -105,10 +111,23 @@ class NormalizedProduct:
 
 
 class Normalizer:
+    """
+    Transforme un RawProduct en NormalizedProduct.
+
+    Multi-marché : la devise est déterminée dans l'ordre de priorité suivant :
+      1. raw.currency si non vide (renseigné par le connecteur d'après MarketConfig)
+      2. settings.market_config.currency (marché actif global)
+      3. "USD" (fallback historique)
+    """
 
     def __init__(self) -> None:
         self._color_map = self._load_yaml_map("color_normalization.yml")
         self._size_map  = self._load_yaml_map("size_normalization.yml")
+        # Devise de fallback depuis le marché actif
+        try:
+            self._default_currency = settings.market_config.currency
+        except Exception:
+            self._default_currency = "USD"
 
     def process(self, raw: RawProduct) -> NormalizedProduct:
         self._validate(raw)
@@ -117,9 +136,12 @@ class Normalizer:
         original_price = self._clean_price(raw.original_price)
         on_sale, discount_pct = self._sale_info(price, original_price)
 
+        # Devise : priorité au connecteur, puis marché actif, puis fallback
+        currency = (raw.currency or "").strip() or self._default_currency or "USD"
+
         # Extraire best_seller et matériaux depuis extra{}
         extra = raw.extra or {}
-        is_best_seller = bool(extra.get("is_best_seller", raw.on_sale if False else False))
+        is_best_seller = bool(extra.get("is_best_seller", False))
         materials: dict = extra.get("materials", {})
 
         normalized = NormalizedProduct(
@@ -129,7 +151,7 @@ class Normalizer:
             brand_slug    = raw.brand_slug.strip().lower(),
             price         = price,
             original_price= original_price,
-            currency      = raw.currency or "USD",
+            currency      = currency,
             on_sale       = on_sale,
             discount_pct  = discount_pct,
             category_raw  = self._clean(raw.category_raw),

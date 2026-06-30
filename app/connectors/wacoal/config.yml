@@ -1,0 +1,72 @@
+name: Wacoal America
+slug: wacoal
+base_url: https://wacoal-america.com
+version: "1.0"
+
+# Wacoal America est sur Shopify — endpoint JSON disponible
+engine: shopify_json
+rate_limit_rps: 0.35
+delay_min: 2.5
+delay_max: 6.0
+
+pagination:
+  type: offset
+  param: page
+  page_size: 250
+  max_pages: 100
+
+product_list_endpoint: /products.json
+
+# Collections shapewear ciblées chez Wacoal America
+# Source : https://wacoal-america.com/collections/shapewear
+target_collections:
+  - shapewear
+  - shapewear-bodysuits
+  - shapewear-shapers
+  - shapewear-bras
+  - shapewear-shorts-and-thigh-slimmers
+  - shapewear-waist-cinchers
+  - shapewear-camisoles-and-tanks
+  - bras
+  - sports-bras
+  - underwear
+  - panties
+  - thongs
+  - bikinis
+  - briefs
+
+# Tags Shopify signalant un Best Seller chez Wacoal
+best_seller_tags:
+  - "best seller"
+  - bestseller
+  - "best-seller"
+  - "top seller"
+  - "fan favorite"
+  - "top rated"
+  - "editor's pick"
+
+# Marchés Wacoal disponibles pour extension future
+# Chaque marché a sa propre base_url et ses collections
+markets:
+  us:
+    base_url: https://wacoal-america.com
+    currency: USD
+    locale: en-US
+  # Extension future :
+  # gb:
+  #   base_url: https://wacoal.co.uk
+  #   currency: GBP
+  #   locale: en-GB
+  # de:
+  #   base_url: https://wacoal.de
+  #   currency: EUR
+  #   locale: de-DE
+  # fr:
+  #   base_url: https://wacoal.fr
+  #   currency: EUR
+  #   locale: fr-FR
+
+headers:
+  Accept-Language: en-US,en;q=0.9
+  Accept: text/html,application/json
+  User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36

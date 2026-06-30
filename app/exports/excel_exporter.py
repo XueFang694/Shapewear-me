@@ -12,7 +12,7 @@ from app.core.logger import get_logger
 
 log = get_logger(__name__)
 
-_BRAND_COLORS = {"spanx": "1B3A6B", "skims": "C8A882", "honeylove": "C0392B", "shapermint": "27AE60"}
+_BRAND_COLORS = {"spanx": "1B3A6B", "skims": "C8A882", "honeylove": "C0392B", "shapermint": "27AE60", "wacoal": "3727AE"}
 _DEFAULT_COLOR = "2C3E50"
 _ALT_ROW = "F7F9FC"
 

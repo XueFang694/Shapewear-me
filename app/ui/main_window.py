@@ -151,7 +151,7 @@ class MainWindow(QMainWindow):
 
             def _scheduled_run(brands: list[str] | None) -> None:
                 if not self._is_running:
-                    slugs = brands or ["spanx", "skims", "honeylove", "shapermint"]
+                    slugs = brands or ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
                     self._start_crawl(brand_slugs=slugs)
 
             self._scheduler = Scheduler(run_callback=_scheduled_run)
@@ -464,7 +464,7 @@ class MainWindow(QMainWindow):
             from app.connectors.registry import ConnectorRegistry
             brand_slugs = ConnectorRegistry().list_connectors()
         except Exception:
-            brand_slugs = ["spanx", "skims", "honeylove", "shapermint"]
+            brand_slugs = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
         self._start_crawl(brand_slugs=brand_slugs)
 
     def _start_crawl(self, brand_slugs: list[str]) -> None:

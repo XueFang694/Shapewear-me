@@ -9,6 +9,9 @@ from app.connectors.spanx.mappings import (
     extract_rating_and_reviews, extract_sizes, extract_variants_detailed,
     normalize_availability, normalize_price,
 )
+from app.connectors.skims.mappings import extract_best_seller_skims, map_category_skims
+from app.connectors.shapermint.mappings import extract_best_seller_shapermint, map_category_shapermint
+from app.connectors.wacoal.mapping import extract_best_seller_wacoal, map_category_wacoal
 from app.core.exceptions import ConnectorParseError
 from app.core.logger import get_logger
 

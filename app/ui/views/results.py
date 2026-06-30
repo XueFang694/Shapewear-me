@@ -50,6 +50,7 @@ _BRAND_COLORS = {
     "skims":      "#C8A882",
     "honeylove":  "#C0392B",
     "shapermint": "#27AE60",
+    "wacoal": "#3727AE",
 }
 
 _COLUMNS = [
@@ -573,7 +574,7 @@ class ResultsView(QWidget):
         # Marque
         self._brand_combo = QComboBox()
         self._brand_combo.addItem("Toutes les marques", "")
-        for slug in ["spanx", "skims", "honeylove", "shapermint"]:
+        for slug in ["spanx", "skims", "honeylove", "shapermint", "wacoal"]:
             self._brand_combo.addItem(slug.upper(), slug)
         self._brand_combo.setStyleSheet(
             "QComboBox { border: 1px solid #CBD5E1; border-radius: 6px; padding: 5px 10px; }"

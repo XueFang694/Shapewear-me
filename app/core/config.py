@@ -1,6 +1,10 @@
 """
 Configuration centrale de l'application.
 Charge les valeurs par défaut puis écrase avec settings.json si présent.
+
+Nouveau : paramètre MARKET pour le support multi-marchés géographiques.
+  - MARKET : slug du marché actif (us, fr, it, es, zh, gb, …)
+  - Voir app/core/market.py pour la liste complète des marchés.
 """
 from __future__ import annotations
 
@@ -45,8 +49,16 @@ class Settings(BaseSettings):
     DEFAULT_RETRY_COUNT: int = 3
     DEFAULT_RETRY_DELAY: float = 2.0    # secondes (doublé à chaque échec)
 
+    # --- Marché géographique ---
+    # Slug du marché actif. Influence la devise, la locale, les en-têtes HTTP,
+    # le formatage des prix et des dates dans les exports.
+    # Surcharger dans .env : MARKET=fr
+    # Valeurs possibles : us, fr, de, it, es, gb, nl, be, ch, pt, pl,
+    #                     se, no, dk, ca, mx, br, au, in, zh, tw, jp, kr
+    MARKET: str = "us"
+
     # --- Application ---
-    APP_NAME: str = "Market Intelligence Platform — Shapewear US"
+    APP_NAME: str = "Market Intelligence Platform"
     APP_VERSION: str = "0.1.0"
     ENV: str = "dev"                    # dev | prod
     LOG_LEVEL: str = "INFO"
@@ -77,6 +89,12 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.ENV == "prod"
+
+    @property
+    def market_config(self):
+        """Retourne le MarketConfig du marché actif (accès pratique)."""
+        from app.core.market import get_market
+        return get_market(self.MARKET)
 
 
 # Instance unique partagée dans toute l'application
