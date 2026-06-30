@@ -1,6 +1,10 @@
-"""Mappings Honeylove."""
+"""Mappings Honeylove — logique spécifique à la marque Honeylove uniquement.
+
+Le parsing JSON Shopify générique vit dans app/scraping/shopify_utils.py
+et est partagé à égalité par tous les connecteurs.
+"""
 from __future__ import annotations
-from app.connectors.honeylove.mappings import (
+from app.scraping.shopify_utils import (
     normalize_price, normalize_availability, extract_variants_detailed,
     extract_sizes, extract_colors, extract_materials, clean_description,
 )

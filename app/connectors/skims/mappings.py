@@ -1,13 +1,15 @@
-"""Mappings SKIMS — réutilise la logique commune de SPANX avec adaptations SKIMS."""
+"""Mappings SKIMS — logique spécifique à la marque SKIMS uniquement.
+
+Le parsing JSON Shopify générique vit dans app/scraping/shopify_utils.py
+et est partagé à égalité par tous les connecteurs.
+"""
 from __future__ import annotations
-from app.connectors.spanx.mappings import (
+from app.scraping.shopify_utils import (
     normalize_price, normalize_availability, extract_variants_detailed,
     extract_sizes, extract_colors, extract_materials, clean_description,
-    map_category, _looks_like_color,
 )
 import re
 
-# SKIMS utilise des noms de catégorie différents
 CATEGORY_MAPPINGS: dict[str, str] = {
     "bodywear":   "Bodysuit",
     "body":       "Bodysuit",
@@ -21,7 +23,6 @@ CATEGORY_MAPPINGS: dict[str, str] = {
     "sleep":      "Tank",
 }
 
-# Tags Best Seller SKIMS
 _SKIMS_BS_TAGS = {"best seller", "bestseller", "top rated", "fan favorite", "fan-favorite"}
 
 def extract_best_seller_skims(tags: list[str] | str, config_tags: list[str] | None = None) -> bool:

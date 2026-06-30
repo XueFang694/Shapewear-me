@@ -1,6 +1,5 @@
 """
-Connecteur SPANX v2 — extraction enrichie :
-  Best Seller, matériaux, variantes granulaires, avis clients.
+Connecteur SPANX v2 — extraction enrichie.
 """
 from __future__ import annotations
 
@@ -8,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from app.connectors.base import BaseConnector, Category, ConnectorMeta, RawProduct
-from app.connectors.spanx.mappings import (
-    clean_description, extract_best_seller, extract_colors,
-    extract_materials, extract_rating_and_reviews, extract_sizes,
-    extract_variants_detailed, map_category,
+from app.connectors.spanx.mappings import extract_best_seller, map_category
+from app.scraping.shopify_utils import (
+    clean_description, extract_colors, extract_materials,
+    extract_rating_and_reviews, extract_sizes, extract_variants_detailed,
     normalize_availability, normalize_price,
 )
 from app.core.exceptions import ConnectorParseError
@@ -100,7 +99,6 @@ class SpanxConnector(BaseConnector):
             if isinstance(tags_raw, str) else list(tags_raw)
         )
 
-        # ── Prix depuis la première variante ──────────────────────────────
         price = original_price = None
         on_sale = False
         if variants:
@@ -111,7 +109,6 @@ class SpanxConnector(BaseConnector):
                 original_price = compare
                 on_sale = True
 
-        # ── Catégorie ─────────────────────────────────────────────────────
         category_raw = p.get("product_type") or None
         if not category_raw:
             for tag in tags:
@@ -119,16 +116,12 @@ class SpanxConnector(BaseConnector):
                     category_raw = tag
                     break
 
-        # ── Matériaux ─────────────────────────────────────────────────────
         materials = extract_materials(p.get("body_html"))
 
-        # ── Avis ─────────────────────────────────────────────────────────
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
 
-        # ── Variantes détaillées ──────────────────────────────────────────
         detailed_variants = extract_variants_detailed(variants, options)
 
-        # ── Images ───────────────────────────────────────────────────────
         images = [img["src"] for img in p.get("images", []) if img.get("src")]
 
         return RawProduct(
@@ -155,7 +148,6 @@ class SpanxConnector(BaseConnector):
                 "vendor":         p.get("vendor"),
                 "is_best_seller": extract_best_seller(tags),
                 "materials":      materials,
-                # Variantes brutes conservées pour la détection de cycle de vie
                 "detailed_variants": detailed_variants,
             },
         )

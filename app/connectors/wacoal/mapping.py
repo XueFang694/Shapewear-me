@@ -1,19 +1,15 @@
 """
-Mappings Wacoal America.
+Mappings Wacoal America — logique spécifique à la marque Wacoal uniquement
+(sous-marques, tailles bonnet, tags best-seller).
 
-Wacoal propose des sous-marques distinctes :
-  - Wacoal       : lingerie et shapewear haut de gamme
-  - b.tempt'd    : lingerie jeune et accessible
-  - Wacoal Sport : soutiens-gorge sport
-
-Les catégories Shopify de Wacoal ne correspondent pas toujours aux slugs
-standards ; ce fichier assure la normalisation vers la taxonomie commune.
+Le parsing JSON Shopify générique vit dans app/scraping/shopify_utils.py
+et est partagé à égalité par tous les connecteurs.
 """
 from __future__ import annotations
 
 import re
 
-from app.connectors.spanx.mappings import (
+from app.scraping.shopify_utils import (
     clean_description,
     extract_colors,
     extract_materials,
@@ -24,12 +20,7 @@ from app.connectors.spanx.mappings import (
     normalize_price,
 )
 
-# ---------------------------------------------------------------------------
-# Correspondance catégories Wacoal → famille taxonomique commune
-# ---------------------------------------------------------------------------
-
 CATEGORY_MAPPINGS: dict[str, str] = {
-    # Shapewear bodysuits
     "shapewear-bodysuits": "Bodysuit",
     "shapewear bodysuits": "Bodysuit",
     "bodysuit":            "Bodysuit",
@@ -37,12 +28,10 @@ CATEGORY_MAPPINGS: dict[str, str] = {
     "body briefer":        "Bodysuit",
     "body briefers":       "Bodysuit",
     "all-in-one":          "Bodysuit",
-    # Shapers génériques
     "shapewear-shapers":   "Bodysuit",
     "shapewear shapers":   "Bodysuit",
     "shapers":             "Bodysuit",
     "shapewear":           "Bodysuit",
-    # Soutiens-gorge
     "shapewear-bras":      "Bra",
     "bras":                "Bra",
     "bra":                 "Bra",
@@ -54,7 +43,6 @@ CATEGORY_MAPPINGS: dict[str, str] = {
     "minimizer bra":       "Bra",
     "full figure bra":     "Bra",
     "nursing bra":         "Bra",
-    # Shorts & cuisse
     "shapewear-shorts-and-thigh-slimmers": "Shaper Short",
     "shorts and thigh slimmers":           "Shaper Short",
     "thigh slimmer":                       "Shaper Short",
@@ -62,12 +50,10 @@ CATEGORY_MAPPINGS: dict[str, str] = {
     "bike shorts":                         "Shaper Short",
     "bike short":                          "Shaper Short",
     "shorts":                              "Shaper Short",
-    # Cintureurs
     "shapewear-waist-cinchers": "Bodysuit",
     "waist cinchers":           "Bodysuit",
     "waist cincher":            "Bodysuit",
     "waist nipper":             "Bodysuit",
-    # Culottes & bas
     "underwear":  "Panty",
     "panties":    "Panty",
     "panty":      "Panty",
@@ -78,7 +64,6 @@ CATEGORY_MAPPINGS: dict[str, str] = {
     "briefs":     "Panty",
     "brief":      "Panty",
     "hipster":    "Panty",
-    # Camisoles & débardeurs
     "shapewear-camisoles-and-tanks": "Tank & Cami",
     "camisoles and tanks":           "Tank & Cami",
     "camisoles":                     "Tank & Cami",
@@ -86,14 +71,9 @@ CATEGORY_MAPPINGS: dict[str, str] = {
     "tanks":                         "Tank & Cami",
     "tank":                          "Tank & Cami",
     "shapewear tank":                "Tank & Cami",
-    # Leggings (rare chez Wacoal mais possible)
     "leggings":   "Shaper Legging",
     "legging":    "Shaper Legging",
 }
-
-# ---------------------------------------------------------------------------
-# Tags signalant un Best Seller chez Wacoal
-# ---------------------------------------------------------------------------
 
 _WACOAL_BS_TAGS: frozenset[str] = frozenset({
     "best seller",
@@ -109,7 +89,6 @@ _WACOAL_BS_TAGS: frozenset[str] = frozenset({
     "award-winning",
 })
 
-# Tags identifiant la sous-marque b.tempt'd
 _BTEMPTD_TAGS: frozenset[str] = frozenset({
     "b.tempt'd",
     "btemptd",
@@ -117,15 +96,10 @@ _BTEMPTD_TAGS: frozenset[str] = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# Fonctions utilitaires
-# ---------------------------------------------------------------------------
-
 def extract_best_seller_wacoal(
     tags: list[str] | str,
     config_tags: list[str] | None = None,
 ) -> bool:
-    """Détecte le statut Best Seller depuis les tags Shopify Wacoal."""
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",")]
     check = _WACOAL_BS_TAGS
@@ -135,17 +109,11 @@ def extract_best_seller_wacoal(
 
 
 def map_category_wacoal(raw: str | None) -> str | None:
-    """
-    Normalise une catégorie brute Wacoal vers la famille taxonomique commune.
-    Accepte les slugs Shopify (avec tirets) et les libellés lisibles.
-    """
     if not raw:
         return None
     key = raw.lower().strip()
-    # Essai direct
     if key in CATEGORY_MAPPINGS:
         return CATEGORY_MAPPINGS[key]
-    # Essai avec normalisation des tirets → espaces
     key_normalized = key.replace("-", " ").replace("_", " ")
     return CATEGORY_MAPPINGS.get(key_normalized)
 
@@ -155,10 +123,6 @@ def extract_sub_brand_wacoal(
     tags: list[str],
     title: str | None,
 ) -> str:
-    """
-    Détecte la sous-marque Wacoal (Wacoal / b.tempt'd / Wacoal Sport).
-    Utilisé pour enrichir le champ extra["sub_brand"].
-    """
     if vendor:
         vendor_low = vendor.lower()
         if "b.tempt" in vendor_low or "btempt" in vendor_low:
@@ -174,9 +138,5 @@ def extract_sub_brand_wacoal(
 
 
 def extract_cup_size_wacoal(sizes: list[str]) -> list[str]:
-    """
-    Filtre les tailles pour ne retourner que les tailles bonnet (30A, 32B…).
-    Utile pour les soutiens-gorge Wacoal qui ont des gammes de tailles étendues.
-    """
     cup_pattern = re.compile(r"^\d{2}[A-K]{1,2}$")
     return [s for s in sizes if cup_pattern.match(s.strip().upper())]
