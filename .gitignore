@@ -26,6 +26,7 @@ data/*.db-wal
 data/*.db-shm
 data/logs/
 data/exports/
+data/shopify/
 
 # Environnement
 .env

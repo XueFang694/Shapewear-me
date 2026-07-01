@@ -1,5 +1,10 @@
 """
-Connecteur SPANX v2 — extraction enrichie.
+Connecteur SPANX v2 — extraction enrichie avec fallback HTML pour la disponibilité.
+
+CORRECTIF v2.1 : ajout du fallback HTML pour la disponibilité.
+Certains stores Shopify (dont SPANX) masquent inventory_quantity dans leur API JSON.
+Quand toutes les variantes remontent "available=False" avec qty=None, on fetch
+la page HTML du produit pour extraire la vraie disponibilité.
 """
 from __future__ import annotations
 
@@ -11,7 +16,8 @@ from app.connectors.spanx.mappings import extract_best_seller, map_category
 from app.scraping.shopify_utils import (
     clean_description, extract_colors, extract_materials,
     extract_rating_and_reviews, extract_sizes, extract_variants_detailed,
-    normalize_availability, normalize_price,
+    normalize_availability, extract_availability_from_html,
+    normalize_price,
 )
 from app.core.exceptions import ConnectorParseError
 from app.core.logger import get_logger
@@ -27,7 +33,7 @@ class SpanxConnector(BaseConnector):
 
     def get_metadata(self) -> ConnectorMeta:
         return ConnectorMeta(
-            name="SPANX", slug="spanx", version="2.0",
+            name="SPANX", slug="spanx", version="2.1",
             engine="shopify_json", base_url=self.base_url,
         )
 
@@ -117,12 +123,37 @@ class SpanxConnector(BaseConnector):
                     break
 
         materials = extract_materials(p.get("body_html"))
-
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
-
         detailed_variants = extract_variants_detailed(variants, options)
-
         images = [img["src"] for img in p.get("images", []) if img.get("src")]
+
+        # Disponibilité : utiliser la logique enrichie
+        availability = normalize_availability(variants)
+
+        # Fallback HTML si toutes les variantes remontent "hors stock"
+        # ET que inventory_quantity est absent (masqué par Shopify)
+        if availability == "out_of_stock" and self._all_qty_missing(variants):
+            html_url = url.replace(".json", "")
+            try:
+                from app.scraping.http_client import HttpClient
+                client = HttpClient(
+                    delay_min=self.delay_min,
+                    delay_max=self.delay_max,
+                    headers=self._config.get("headers", {}),
+                )
+                response = client.get(html_url, timeout=20)
+                if response.status_code == 200:
+                    html_avail = extract_availability_from_html(response.text)
+                    if html_avail != "unknown":
+                        availability = html_avail
+                        log.debug(
+                            "Disponibilité corrigée via HTML",
+                            brand="spanx",
+                            url=url,
+                            availability=availability,
+                        )
+            except Exception as exc:
+                log.debug("Fallback HTML échoué", url=url, error=str(exc))
 
         return RawProduct(
             external_id=str(p.get("id", p.get("handle", ""))),
@@ -139,15 +170,22 @@ class SpanxConnector(BaseConnector):
             sizes=extract_sizes(variants),
             colors=extract_colors(variants),
             variants=detailed_variants,
-            availability=normalize_availability(variants),
+            availability=availability,
             rating=rating,
             review_count=review_count,
             extra={
-                "handle":         p.get("handle"),
-                "tags":           tags,
-                "vendor":         p.get("vendor"),
-                "is_best_seller": extract_best_seller(tags),
-                "materials":      materials,
+                "handle":            p.get("handle"),
+                "tags":              tags,
+                "vendor":            p.get("vendor"),
+                "is_best_seller":    extract_best_seller(tags),
+                "materials":         materials,
                 "detailed_variants": detailed_variants,
             },
         )
+
+    @staticmethod
+    def _all_qty_missing(variants: list[dict]) -> bool:
+        """Vérifie si inventory_quantity est absent sur toutes les variantes."""
+        if not variants:
+            return False
+        return all(v.get("inventory_quantity") is None for v in variants)

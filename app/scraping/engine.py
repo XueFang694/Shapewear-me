@@ -15,6 +15,8 @@ Usage :
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import queue
 import threading
 import time
@@ -343,6 +345,10 @@ class ScrapingEngine:
             if response.status_code != 200:
                 return None
             data = response.json()
+            Path("data/shopify/shopify_{}.json".format(url.split("/")[-1])).write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
             product_data = data.get("product", data)
             return self._connector.parse_product(url, product_data)
         else:

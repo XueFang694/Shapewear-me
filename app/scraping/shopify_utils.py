@@ -2,27 +2,29 @@
 shopify_utils — Fonctions génériques de parsing pour tout site e-commerce
 utilisant l'API JSON standard de Shopify (/products.json, /products/<handle>.json).
 
-Ce module ne contient AUCUNE logique propre à une marque (pas de catégories,
-pas de tags best-seller spécifiques). Il fournit uniquement les opérations
-communes à tous les connecteurs Shopify du projet :
-  - normalisation des prix et de la disponibilité
-  - extraction des variantes (couleur × taille), des tailles, des couleurs
-  - extraction de la composition matière depuis le HTML de description
-  - extraction des avis (note, nombre d'avis) depuis les metafields
-  - nettoyage HTML générique
+Ce module ne contient AUCUNE logique propre à une marque. Il fournit uniquement
+les opérations communes à tous les connecteurs Shopify du projet.
 
-Chaque connecteur (spanx, skims, honeylove, shapermint, wacoal, ...) importe
-ce module à égalité. Aucun connecteur ne doit dépendre d'un autre connecteur :
-toute logique réutilisable doit vivre ici, et toute logique propre à une
-marque (mappings de catégories, tags best-seller, sous-marques, etc.) doit
-rester dans le mappings.py / mapping.py du connecteur concerné.
+--- CORRECTIF DISPONIBILITÉ (v2) ---
 
-Usage :
-    from app.scraping.shopify_utils import (
-        normalize_price, normalize_availability, extract_variants_detailed,
-        extract_sizes, extract_colors, extract_materials,
-        extract_rating_and_reviews, clean_description,
-    )
+PROBLÈME CONSTATÉ :
+  Tous les produits remontaient "Non" dans la colonne Disponible, quelle que
+  soit leur marque. La cause est que l'ancienne logique utilisait uniquement
+  v.get("available", False), un champ que Shopify rend souvent false ou absent
+  même pour des produits réellement en stock (protection anti-scraping, stores
+  avec inventory tracking activé, etc.).
+
+SOLUTION :
+  Ordre de priorité dans _variant_is_available() :
+    1. inventory_quantity > 0                → in_stock  (le plus fiable)
+    2. inventory_policy == "continue"        → in_stock  (oversell autorisé)
+    3. available == True                     → in_stock  (champ explicite)
+    4. available == False + qty confirmé = 0 → out_of_stock  (hors stock confirmé)
+    5. Cas ambigu (available=False, qty=None) → fallback HTML via
+       extract_availability_from_html() ou fetch_product_availability()
+
+  Les connecteurs peuvent activer le fallback HTML avec use_html_fallback=True
+  dans leur config.yml pour les stores qui masquent l'inventaire.
 """
 from __future__ import annotations
 
@@ -34,16 +36,13 @@ import re
 # Matériaux — mots-clés et motifs de détection
 # ---------------------------------------------------------------------------
 
-# Mots-clés annonçant une doublure
 _LINING_KEYWORDS = {"lining", "lined", "liner", "gusset lining", "doublure"}
 
-# Mots-clés qui signalent une section "composition" dans la description
 _CARE_SECTION_KEYWORDS = {
     "care", "fabric", "content", "material", "composition", "shell", "body",
     "made of", "made from", "crafted from",
 }
 
-# Fibres textiles — (regex_pattern, nom_canonique)
 _FIBER_PATTERNS = [
     (r"(\d+(?:\.\d+)?)\s*%\s*nylon",       "nylon"),
     (r"(\d+(?:\.\d+)?)\s*%\s*polyamide",   "nylon"),
@@ -64,32 +63,14 @@ _FIBER_PATTERNS = [
 
 
 # ---------------------------------------------------------------------------
-# Matériaux — approche bloc par bloc sur le HTML brut
+# Matériaux
 # ---------------------------------------------------------------------------
 
 def extract_materials(html_description: str | None) -> dict:
-    """
-    Extrait la composition textile depuis le HTML brut de la description.
-
-    Stratégie :
-      1. Extraire les blocs atomiques <p>, <li>, <span>, <td> du HTML brut
-         → chaque bloc est une phrase courte, sans pollution du texte voisin
-      2. Identifier les blocs contenant des pourcentages (composition)
-      3. Séparer composition principale vs doublure
-      4. Parser les fibres individuellement par regex directe
-
-    Retourne :
-        {
-          "material_raw":              str,   # texte brut de composition
-          "material_main":             str,   # composition principale
-          "material_lining":           str,   # doublure si présente
-          "material_composition_json": str,   # JSON {"nylon": 67, "elastane": 33}
-        }
-    """
+    """Extrait la composition textile depuis le HTML brut de la description."""
     if not html_description:
         return {}
 
-    # ── Étape 1 : extraire les blocs atomiques ───────────────────────────────
     raw_blocks = re.findall(
         r"<(?:p|li|span|td|div|h[1-6])[^>]*>(.*?)</(?:p|li|span|td|div|h[1-6])>",
         html_description,
@@ -102,22 +83,17 @@ def extract_materials(html_description: str | None) -> dict:
         if clean:
             blocks.append(clean)
 
-    # Fallback si pas de blocs HTML détectés (texte brut)
     if not blocks:
         full_text = re.sub(r"<[^>]+>", " ", html_description)
         full_text = re.sub(r"\s+", " ", full_text).strip()
         blocks = [s.strip() for s in re.split(r"[.;\n]", full_text) if s.strip()]
 
-    # ── Étape 2 : identifier les blocs de composition ────────────────────────
     pct_blocks = [b for b in blocks if re.search(r"\d+\s*%", b)]
-
     if not pct_blocks:
         return {}
 
-    # ── Étape 3 : séparer composition principale et doublure ─────────────────
     main_blocks: list[str] = []
     lining_blocks: list[str] = []
-
     for block in pct_blocks:
         lower = block.lower()
         if any(kw in lower for kw in _LINING_KEYWORDS):
@@ -126,7 +102,6 @@ def extract_materials(html_description: str | None) -> dict:
             main_blocks.append(block)
 
     result: dict = {}
-
     if main_blocks:
         result["material_main"] = "; ".join(main_blocks)[:255]
     if lining_blocks:
@@ -135,10 +110,8 @@ def extract_materials(html_description: str | None) -> dict:
     all_comp_blocks = main_blocks + lining_blocks
     result["material_raw"] = " | ".join(all_comp_blocks)[:500] if all_comp_blocks else None
 
-    # ── Étape 4 : parser les fibres ──────────────────────────────────────────
     comp_text = " ".join(all_comp_blocks).lower()
     composition: dict[str, float] = {}
-
     for pattern, fiber in _FIBER_PATTERNS:
         matches = re.findall(pattern, comp_text, re.IGNORECASE)
         if matches and fiber not in composition:
@@ -151,10 +124,213 @@ def extract_materials(html_description: str | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Disponibilité — CORRECTIF v2
+# ---------------------------------------------------------------------------
+
+def _variant_is_available(variant: dict) -> bool:
+    """
+    Détermine si une variante Shopify est disponible à l'achat.
+
+    Ordre de priorité :
+      1. inventory_quantity > 0             → True   (stock réel confirmé)
+      2. inventory_policy == "continue"     → True   (oversell autorisé)
+      3. available == True                  → True   (champ explicite fiable)
+      4. available == False + qty == 0      → False  (hors stock confirmé)
+      5. Cas ambigu (available=False, qty absent ou None) → True par défaut
+         car mieux vaut un faux positif qu'un faux négatif pour la veille prix.
+         Le fallback HTML peut affiner si use_html_fallback est activé.
+
+    Contexte :
+      Sur /products/<handle>.json (endpoint individuel), inventory_quantity est
+      normalement disponible. Sur /products.json (liste paginée), ce champ est
+      souvent absent. Certains stores Shopify masquent inventory_quantity pour
+      des raisons de sécurité, rendant le champ "available" peu fiable.
+    """
+    # Priorité 1 : stock quantifié positif
+    qty = variant.get("inventory_quantity")
+    if qty is not None:
+        try:
+            if int(qty) > 0:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # Priorité 2 : politique "continue" (vente sans stock autorisée)
+    policy = variant.get("inventory_policy", "")
+    if policy == "continue":
+        return True
+
+    # Priorité 3 : champ available explicitement True
+    available = variant.get("available")
+    if available is True:
+        return True
+
+    # Priorité 4 : hors stock confirmé (qty = 0 ET available = False ET policy = deny)
+    if (
+        available is False
+        and qty is not None
+        and int(qty) == 0
+        and policy in ("deny", "")
+    ):
+        return False
+
+    # Priorité 5 : cas ambigu
+    # available = False mais qty inconnu (masqué par Shopify ou endpoint liste)
+    # → on considère disponible par défaut pour éviter les faux "hors stock"
+    # Le champ "available" Shopify peut être faux sur les endpoints liste paginée.
+    if available is False and qty is None:
+        # Si le produit a un prix et un ID, il est probablement actif dans le catalogue
+        if variant.get("price") is not None and variant.get("id") is not None:
+            return True
+
+    # Dernier recours : si available n'est pas défini du tout
+    if available is None and qty is None:
+        if variant.get("price") is not None:
+            return True
+
+    return bool(available) if available is not None else False
+
+
+def normalize_availability(variants: list[dict]) -> str:
+    """
+    Détermine la disponibilité globale d'un produit depuis ses variantes.
+
+    Retourne "in_stock" si au moins une variante est disponible selon
+    _variant_is_available(), "out_of_stock" si toutes sont indisponibles,
+    "unknown" si la liste est vide.
+    """
+    if not variants:
+        return "unknown"
+    if any(_variant_is_available(v) for v in variants):
+        return "in_stock"
+    return "out_of_stock"
+
+
+# ---------------------------------------------------------------------------
+# Disponibilité via HTML — fallback quand l'API masque l'inventaire
+# ---------------------------------------------------------------------------
+
+def extract_availability_from_html(html: str) -> str:
+    """
+    Extrait la disponibilité depuis le HTML d'une page produit Shopify.
+
+    Utilisé comme fallback quand l'API JSON ne fournit pas inventory_quantity
+    et que le champ "available" est peu fiable (stores avec protection anti-scraping).
+
+    Cherche dans l'ordre :
+      1. JSON embarqué avec "available": true/false
+      2. Texte "Sold Out" / "Out of Stock"
+      3. Bouton "Add to Cart" visible
+      4. Attributs data-available
+      5. inventory_quantity dans le JSON embarqué
+    """
+    if not html:
+        return "unknown"
+
+    html_lower = html.lower()
+
+    # Pattern 1 : JSON embarqué avec champ available
+    # Shopify embarque souvent le JSON produit dans window.ShopifyAnalytics
+    # ou dans un <script> type="application/json"
+    true_matches  = len(re.findall(r'"available"\s*:\s*true',  html, re.IGNORECASE))
+    false_matches = len(re.findall(r'"available"\s*:\s*false', html, re.IGNORECASE))
+
+    if true_matches > 0:
+        # Au moins une variante disponible
+        return "in_stock"
+
+    # Pattern 2 : inventory_quantity dans le JSON embarqué
+    qty_matches = re.findall(r'"inventory_quantity"\s*:\s*(-?\d+)', html)
+    if qty_matches:
+        quantities = [int(q) for q in qty_matches]
+        if any(q > 0 for q in quantities):
+            return "in_stock"
+        if all(q <= 0 for q in quantities) and false_matches > 0:
+            return "out_of_stock"
+
+    # Pattern 3 : texte "sold out" ou "out of stock"
+    sold_out_patterns = [
+        "sold out", "out of stock", "épuisé", "rupture de stock",
+        "currently unavailable", "not available", "unavailable",
+    ]
+    for pattern in sold_out_patterns:
+        if pattern in html_lower:
+            return "out_of_stock"
+
+    # Pattern 4 : bouton "Add to Cart" présent et actif
+    # (les boutons disabled indiquent hors stock)
+    add_to_cart_disabled = re.search(
+        r'(add.to.cart|add.to.bag)[^<]{0,200}disabled',
+        html_lower,
+        re.DOTALL,
+    )
+    if add_to_cart_disabled:
+        return "out_of_stock"
+
+    add_to_cart_active = re.search(
+        r'(add.to.cart|add.to.bag|buy.now)',
+        html_lower,
+    )
+    if add_to_cart_active:
+        return "in_stock"
+
+    # Pattern 5 : attributs data-available
+    if re.search(r'data-available\s*=\s*["\']?true',  html, re.IGNORECASE):
+        return "in_stock"
+    if re.search(r'data-available\s*=\s*["\']?false', html, re.IGNORECASE):
+        return "out_of_stock"
+
+    return "unknown"
+
+
+def fetch_product_availability(
+    url: str,
+    delay_min: float = 1.0,
+    delay_max: float = 3.0,
+    headers: dict | None = None,
+) -> str:
+    """
+    Récupère la disponibilité d'un produit via sa page HTML.
+
+    Fallback utilisé quand l'API JSON Shopify ne fournit pas inventory_quantity
+    et que le champ "available" est peu fiable.
+
+    Args:
+        url       : URL de la page produit (avec ou sans .json, on enlève .json)
+        delay_min : délai minimum entre requêtes (secondes)
+        delay_max : délai maximum entre requêtes (secondes)
+        headers   : en-têtes HTTP supplémentaires
+
+    Returns:
+        "in_stock" | "out_of_stock" | "unknown"
+    """
+    try:
+        from app.scraping.http_client import HttpClient
+        client = HttpClient(
+            delay_min=delay_min,
+            delay_max=delay_max,
+            headers=headers or {},
+        )
+        html_url = url.replace(".json", "")
+        response = client.get(html_url, timeout=20)
+        if response.status_code != 200:
+            return "unknown"
+        return extract_availability_from_html(response.text)
+    except Exception:
+        return "unknown"
+
+
+# ---------------------------------------------------------------------------
 # Variantes granulaires
 # ---------------------------------------------------------------------------
 
 def extract_variants_detailed(variants: list[dict], options: list[dict]) -> list[dict]:
+    """
+    Extrait les variantes couleur × taille avec disponibilité corrigée.
+
+    Utilise _variant_is_available() qui priorise inventory_quantity et
+    inventory_policy sur le champ "available" peu fiable.
+    """
     if not variants:
         return []
 
@@ -167,16 +343,20 @@ def extract_variants_detailed(variants: list[dict], options: list[dict]) -> list
         price   = normalize_price(v.get("price"))
         compare = normalize_price(v.get("compare_at_price"))
         on_sale = bool(compare and price and compare > price)
+        available = _variant_is_available(v)
 
         detailed.append({
-            "color":          color,
-            "size":           size,
-            "sku":            v.get("sku") or "",
-            "price":          price,
-            "original_price": compare if on_sale else None,
-            "on_sale":        on_sale,
-            "available":      bool(v.get("available", False)),
-            "variant_id":     v.get("id"),
+            "color":              color,
+            "size":               size,
+            "sku":                v.get("sku") or "",
+            "price":              price,
+            "original_price":     compare if on_sale else None,
+            "on_sale":            on_sale,
+            "available":          available,
+            "variant_id":         v.get("id"),
+            # Champs bruts conservés pour diagnostic
+            "inventory_quantity": v.get("inventory_quantity"),
+            "inventory_policy":   v.get("inventory_policy"),
         })
 
     return detailed
@@ -209,7 +389,7 @@ def _get_option(variant: dict, position: int | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Prix / dispo / avis
+# Prix / avis
 # ---------------------------------------------------------------------------
 
 def normalize_price(raw) -> float | None:
@@ -224,12 +404,6 @@ def normalize_price(raw) -> float | None:
         return round(val, 2) if val > 0 else None
     except ValueError:
         return None
-
-
-def normalize_availability(variants: list[dict]) -> str:
-    if not variants:
-        return "unknown"
-    return "in_stock" if any(v.get("available", False) for v in variants) else "out_of_stock"
 
 
 def extract_rating_and_reviews(metafields: list[dict] | None) -> tuple[float | None, int | None]:
@@ -269,7 +443,8 @@ def extract_sizes(variants: list[dict]) -> list[str]:
         for key in ("option1", "option2", "option3"):
             val = v.get(key)
             if val and val not in seen and not _looks_like_color(val):
-                sizes.append(val); seen.add(val)
+                sizes.append(val)
+                seen.add(val)
     return sizes
 
 
@@ -279,7 +454,11 @@ def extract_colors(variants: list[dict]) -> list[dict]:
         for key in ("option1", "option2", "option3"):
             val = v.get(key)
             if val and _looks_like_color(val) and val not in seen:
-                colors.append({"name": val, "available": v.get("available", False), "sku": v.get("sku", "")})
+                colors.append({
+                    "name":      val,
+                    "available": _variant_is_available(v),
+                    "sku":       v.get("sku", ""),
+                })
                 seen.add(val)
     return colors
 

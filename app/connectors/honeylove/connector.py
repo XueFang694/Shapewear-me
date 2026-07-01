@@ -1,13 +1,14 @@
-"""Connecteur Honeylove — moteur shopify_json."""
+"""Connecteur Honeylove v1.1 — avec fallback HTML pour la disponibilité."""
 from __future__ import annotations
 from pathlib import Path
 from typing import Any
 from app.connectors.base import BaseConnector, Category, ConnectorMeta, RawProduct
 from app.connectors.honeylove.mappings import extract_best_seller_hl, map_category_hl
+from app.scraping.shopify_connector_mixin import ShopifyConnectorMixin
 from app.scraping.shopify_utils import (
     clean_description, extract_colors, extract_materials,
     extract_rating_and_reviews, extract_sizes, extract_variants_detailed,
-    normalize_availability, normalize_price,
+    normalize_price,
 )
 from app.core.exceptions import ConnectorParseError
 from app.core.logger import get_logger
@@ -16,12 +17,12 @@ log = get_logger(__name__)
 _CONFIG_PATH = Path(__file__).parent / "config.yml"
 
 
-class HoneyloveConnector(BaseConnector):
+class HoneyloveConnector(ShopifyConnectorMixin, BaseConnector):
     def __init__(self, config_path: Path | None = None):
         super().__init__(config_path=config_path or _CONFIG_PATH)
 
     def get_metadata(self) -> ConnectorMeta:
-        return ConnectorMeta(name="Honeylove", slug="honeylove", version="1.0",
+        return ConnectorMeta(name="Honeylove", slug="honeylove", version="1.1",
                              engine="shopify_json", base_url=self.base_url)
 
     def get_categories(self) -> list[Category]:
@@ -32,29 +33,7 @@ class HoneyloveConnector(BaseConnector):
         ]
 
     def get_product_urls(self, category: Category) -> list[str]:
-        from app.scraping.http_client import HttpClient
-        from app.scraping.pagination import PaginationHandler
-        client = HttpClient(delay_min=self.delay_min, delay_max=self.delay_max,
-                            headers=self._config.get("headers", {}))
-        pg = self._config.get("pagination", {})
-        paginator = PaginationHandler(pagination_type=pg.get("type", "offset"),
-                                      page_size=pg.get("page_size", 250),
-                                      max_pages=pg.get("max_pages", 100))
-        base = f"{self.base_url}/collections/{category.slug}/products.json"
-        handles: list[str] = []
-        for url in paginator.iter_pages(base):
-            try:
-                r = client.get(url)
-                if r.status_code != 200: break
-                products = r.json().get("products", [])
-                if not products: break
-                handles.extend(p["handle"] for p in products if p.get("handle"))
-                if len(products) < pg.get("page_size", 250): break
-            except Exception as exc:
-                log.error("Erreur pagination Honeylove", url=url, error=str(exc)); break
-        urls = [f"{self.base_url}/products/{h}.json" for h in handles]
-        log.info("URLs Honeylove", category=category.slug, count=len(urls))
-        return urls
+        return self._shopify_get_product_urls(category)
 
     def parse_product(self, url: str, data: str | dict) -> RawProduct:
         if not isinstance(data, dict):
@@ -76,6 +55,10 @@ class HoneyloveConnector(BaseConnector):
         category_raw = p.get("product_type") or next((t for t in tags if map_category_hl(t)), None)
         materials = extract_materials(p.get("body_html"))
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
+        detailed_variants = extract_variants_detailed(variants, options)
+
+        availability = self._resolve_availability(variants, url)
+
         return RawProduct(
             external_id=str(p.get("id", p.get("handle", ""))),
             url=url.replace(".json", ""),
@@ -89,13 +72,13 @@ class HoneyloveConnector(BaseConnector):
             images=[img["src"] for img in p.get("images", []) if img.get("src")],
             sizes=extract_sizes(variants),
             colors=extract_colors(variants),
-            variants=extract_variants_detailed(variants, options),
-            availability=normalize_availability(variants),
+            variants=detailed_variants,
+            availability=availability,
             rating=rating, review_count=review_count,
             extra={
                 "handle": p.get("handle"), "tags": tags, "vendor": p.get("vendor"),
                 "is_best_seller": extract_best_seller_hl(tags, self._config.get("best_seller_tags")),
                 "materials": materials,
-                "detailed_variants": extract_variants_detailed(variants, options),
+                "detailed_variants": detailed_variants,
             },
         )
