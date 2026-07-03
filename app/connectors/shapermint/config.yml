@@ -1,11 +1,18 @@
 name: Shapermint
 slug: shapermint
 base_url: https://shapermint.com
-version: "1.0"
+version: "1.1"
 engine: shopify_json
 rate_limit_rps: 0.3
 delay_min: 2.5
 delay_max: 6.0
+
+# Shapermint bloque les endpoints /collections/<slug>/products.json (→ 404).
+# On utilise l'endpoint global /products.json qui liste tous les produits,
+# puis on filtre par product_type côté connecteur.
+# Le champ pagination_strategy permet au connecteur de choisir la bonne
+# stratégie sans toucher au code du mixin partagé.
+pagination_strategy: global     # "global" = /products.json , "collection" = /collections/<slug>/products.json
 
 pagination:
   type: offset
@@ -15,13 +22,38 @@ pagination:
 
 product_list_endpoint: /products.json
 
+# Catégories visibles sur shapermint.com/collections/<slug>
+# Utilisées uniquement pour le filtrage par product_type dans le parsing,
+# pas pour construire les URLs de pagination (voir pagination_strategy).
 target_collections:
-  - shapewear
   - bodysuits
+  - shorts
   - bras
-  - briefs
-  - thighs-slimmer
+  - underwear
+  - leggings
+  - tanks-camis
+  - shapewear
   - waist-trainers
+
+# product_type Shopify → famille interne.
+# Shapermint stocke plusieurs marques ; on ne garde que les types shapewear.
+target_product_types:
+  - Bodysuits
+  - Bodysuit
+  - Shorts
+  - Shaper Shorts
+  - Bras
+  - Bra
+  - Underwear
+  - Panties
+  - Leggings
+  - Camis
+  - Tanks
+  - Shapewear
+  - Waist Trainers
+  - Body Shapers
+  - Full Body Shapers
+  - Slips
 
 best_seller_tags:
   - "best seller"

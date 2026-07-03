@@ -1,7 +1,7 @@
 name: SKIMS
 slug: skims
 base_url: https://skims.com
-version: "1.0"
+version: "1.1"
 engine: shopify_json
 rate_limit_rps: 0.4
 delay_min: 2.0
@@ -15,14 +15,17 @@ pagination:
 
 product_list_endpoint: /products.json
 
-# Catégories shapewear ciblées (slugs Shopify SKIMS)
+# Collections réelles SKIMS (vérifiées juillet 2026).
+# Les anciens slugs (bodywear, bras, underwear, swim, shorts, leggings)
+# retournaient tous 404 — SKIMS a renommé ses collections.
 target_collections:
-  - bodywear
-  - bras
-  - underwear
+  - shapewear
+  - shapewear-bodysuits
+  - skims-body
+  - bras-and-underwear
   - swim
-  - shorts
-  - leggings
+  - fits-everybody
+  - cotton
 
 # Tags Shopify qui signalent "Best Seller" chez SKIMS
 best_seller_tags:

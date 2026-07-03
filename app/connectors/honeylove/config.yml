@@ -23,6 +23,28 @@ target_collections:
   - leggings
   - tops
 
+# Suffixes de marché à exclure (handles qui se terminent par -xx).
+# Quand un produit existe en version -us ET en version générique (sans suffixe),
+# on préfère -us. Les autres marchés sont toujours exclus.
+market_suffixes:
+  preferred: "us"
+  excluded:
+    - ca
+    - au
+    - gb
+    - uk
+    - eu
+    - de
+    - fr
+    - it
+    - es
+    - nl
+    - nz
+    - ie
+    - sg
+    - jp
+    - row   # rest-of-world
+
 best_seller_tags:
   - "best seller"
   - bestseller
