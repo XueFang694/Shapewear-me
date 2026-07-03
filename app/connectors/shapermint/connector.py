@@ -1,14 +1,18 @@
-"""Connecteur Shapermint v1.2 — endpoint global /products.json.
+"""Connecteur Shapermint v1.3 — fallback multi-endpoints.
 
-Shapermint bloque les endpoints par collection
-(/collections/<slug>/products.json → 404). Ce connecteur utilise donc
-/products.json pour récupérer l'ensemble du catalogue, puis filtre les
-produits par product_type pour ne conserver que les catégories shapewear
-définies dans target_product_types du config.yml.
+Shapermint bloque /products.json à la racine (HTTP 404).
+Ce connecteur essaie les endpoints dans l'ordre défini par product_list_endpoints
+dans config.yml, puis bascule en mode par-collection si tous échouent.
 
-La méthode get_categories() retourne des catégories "virtuelles" basées
-sur les product_types cibles ; get_product_urls() délègue la pagination
-à _paginate_global() qui appelle /products.json directement.
+Ordre de tentative :
+  1. /en-US/products.json  (endpoint localisé — peut fonctionner selon la config Shopify)
+  2. /products.json         (endpoint standard Shopify)
+  3. /collections/<slug>/products.json  pour chaque slug de target_collections (fallback)
+
+Changements v1.3 :
+  - Logique de découverte d'endpoint avec fallback automatique.
+  - Warning clair sur chaque endpoint qui échoue.
+  - Mode par-collection activé si aucun endpoint global ne répond.
 """
 from __future__ import annotations
 
@@ -33,7 +37,6 @@ from app.core.logger import get_logger
 log = get_logger(__name__)
 _CONFIG_PATH = Path(__file__).parent / "config.yml"
 
-# Catégorie virtuelle unique utilisée pour le crawl global
 _GLOBAL_CATEGORY_SLUG = "_all"
 
 
@@ -41,8 +44,6 @@ class ShapermintConnector(BaseConnector):
 
     def __init__(self, config_path: Path | None = None):
         super().__init__(config_path=config_path or _CONFIG_PATH)
-
-        # Ensemble des product_types à conserver (insensible à la casse)
         raw_types: list[str] = self._config.get("target_product_types", [])
         self._target_types: frozenset[str] = frozenset(t.lower() for t in raw_types)
 
@@ -52,7 +53,7 @@ class ShapermintConnector(BaseConnector):
         return ConnectorMeta(
             name="Shapermint",
             slug="shapermint",
-            version="1.2",
+            version="1.3",
             engine="shopify_json",
             base_url=self.base_url,
         )
@@ -62,8 +63,8 @@ class ShapermintConnector(BaseConnector):
     def get_categories(self) -> list[Category]:
         """
         Retourne une catégorie virtuelle unique "_all".
-        Shapermint ne supporte pas les endpoints par collection ;
-        le filtrage par type se fait après parsing.
+        get_product_urls() tente d'abord les endpoints globaux, puis bascule
+        en mode par-collection si aucun endpoint global ne répond.
         """
         return [
             Category(
@@ -78,17 +79,68 @@ class ShapermintConnector(BaseConnector):
 
     def get_product_urls(self, category: Category) -> list[str]:
         """
-        Pagine /products.json et retourne les URLs des produits
-        dont le product_type est dans target_product_types.
+        Tente les endpoints globaux dans l'ordre, puis bascule
+        sur la pagination par collection si tous échouent.
         """
         from app.scraping.http_client import HttpClient
-        from app.scraping.pagination import PaginationHandler
 
         client = HttpClient(
             delay_min=self.delay_min,
             delay_max=self.delay_max,
             headers=self._config.get("headers", {}),
         )
+
+        # Essayer les endpoints globaux dans l'ordre
+        global_endpoints: list[str] = self._config.get("product_list_endpoints", [
+            "/en-US/products.json",
+            "/products.json",
+        ])
+
+        for endpoint in global_endpoints:
+            probe_url = f"{self.base_url}{endpoint}?page=1&limit=1"
+            try:
+                r = client.get(probe_url)
+                if r.status_code == 200:
+                    data = r.json()
+                    if "products" in data:
+                        log.info(
+                            "Shapermint endpoint global trouvé",
+                            endpoint=endpoint,
+                        )
+                        return self._paginate_global(client, endpoint)
+                    else:
+                        log.warning(
+                            "Shapermint endpoint répond 200 mais sans 'products'",
+                            endpoint=endpoint,
+                            keys=list(data.keys())[:5],
+                        )
+                else:
+                    log.warning(
+                        "Shapermint endpoint global indisponible",
+                        endpoint=endpoint,
+                        status=r.status_code,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Shapermint erreur sonde endpoint",
+                    endpoint=endpoint,
+                    error=str(exc),
+                )
+
+        # Fallback : pagination par collection
+        log.warning(
+            "Shapermint — aucun endpoint global disponible, bascule sur mode par-collection",
+            tried=global_endpoints,
+            fallback_collections=self._config.get("target_collections", []),
+        )
+        return self._paginate_by_collections(client)
+
+    # ── Pagination globale ────────────────────────────────────────────────
+
+    def _paginate_global(self, client: Any, endpoint: str) -> list[str]:
+        """Pagine l'endpoint global et retourne les handles filtrés."""
+        from app.scraping.pagination import PaginationHandler
+
         pg = self._config.get("pagination", {})
         paginator = PaginationHandler(
             pagination_type=pg.get("type", "offset"),
@@ -96,19 +148,19 @@ class ShapermintConnector(BaseConnector):
             max_pages=pg.get("max_pages", 100),
         )
 
-        base_url = f"{self.base_url}/products.json"
+        base_url = f"{self.base_url}{endpoint}"
         handles: list[str] = []
-        total_seen = 0
-        total_kept = 0
+        total_seen = total_kept = page_count = 0
 
         for page_url in paginator.iter_pages(base_url):
             try:
                 r = client.get(page_url)
+                page_count += 1
+
                 if r.status_code != 200:
-                    log.warning(
-                        "Shapermint /products.json — statut inattendu",
-                        status=r.status_code,
-                        url=page_url,
+                    log.error(
+                        "Shapermint pagination globale — statut inattendu",
+                        status=r.status_code, url=page_url,
                     )
                     break
 
@@ -117,32 +169,109 @@ class ShapermintConnector(BaseConnector):
                     break
 
                 total_seen += len(products)
-
                 for p in products:
                     handle = p.get("handle")
-                    ptype  = (p.get("product_type") or "").lower()
-                    # Filtre : conserver uniquement les types shapewear
+                    ptype  = (p.get("product_type") or "").lower().strip()
                     if handle and (not self._target_types or ptype in self._target_types):
                         handles.append(handle)
                         total_kept += 1
 
+                if page_count % 5 == 0:
+                    log.debug(
+                        "Shapermint pagination globale en cours",
+                        page=page_count, seen=total_seen, kept=total_kept,
+                    )
+
                 if len(products) < pg.get("page_size", 250):
-                    break  # Dernière page
+                    break
 
             except Exception as exc:
                 log.error(
-                    "Erreur pagination Shapermint",
-                    url=page_url,
-                    error=str(exc),
+                    "Shapermint erreur pagination globale",
+                    url=page_url, error=str(exc),
                 )
                 break
 
         urls = [f"{self.base_url}/products/{h}.json" for h in handles]
         log.info(
-            "URLs Shapermint (endpoint global)",
-            seen=total_seen,
-            kept=total_kept,
-            urls=len(urls),
+            "URLs Shapermint (global)",
+            endpoint=endpoint, pages=page_count,
+            seen=total_seen, kept=total_kept, urls=len(urls),
+        )
+        return urls
+
+    # ── Pagination par collection (fallback) ──────────────────────────────
+
+    def _paginate_by_collections(self, client: Any) -> list[str]:
+        """
+        Pagination par collection — fallback si l'endpoint global est indisponible.
+        Tente chaque slug de target_collections.
+        """
+        from app.scraping.pagination import PaginationHandler
+
+        pg = self._config.get("pagination", {})
+        paginator = PaginationHandler(
+            pagination_type=pg.get("type", "offset"),
+            page_size=pg.get("page_size", 250),
+            max_pages=pg.get("max_pages", 100),
+        )
+
+        target_collections: list[str] = self._config.get("target_collections", [])
+        all_handles: list[str] = []
+        seen_handles: set[str] = set()
+
+        for slug in target_collections:
+            base_url = f"{self.base_url}/collections/{slug}/products.json"
+            found_any = False
+
+            for page_url in paginator.iter_pages(base_url):
+                try:
+                    r = client.get(page_url)
+
+                    if r.status_code == 404:
+                        log.warning(
+                            "Shapermint collection introuvable (404)",
+                            slug=slug, url=page_url,
+                        )
+                        break
+
+                    if r.status_code != 200:
+                        log.error(
+                            "Shapermint collection — statut inattendu",
+                            slug=slug, status=r.status_code,
+                        )
+                        break
+
+                    products = r.json().get("products", [])
+                    if not products:
+                        break
+
+                    found_any = True
+                    for p in products:
+                        handle = p.get("handle")
+                        if handle and handle not in seen_handles:
+                            ptype = (p.get("product_type") or "").lower().strip()
+                            if not self._target_types or ptype in self._target_types:
+                                all_handles.append(handle)
+                                seen_handles.add(handle)
+
+                    if len(products) < pg.get("page_size", 250):
+                        break
+
+                except Exception as exc:
+                    log.error(
+                        "Shapermint erreur pagination collection",
+                        slug=slug, url=page_url, error=str(exc),
+                    )
+                    break
+
+            if found_any:
+                log.info("Shapermint collection crawlée", slug=slug)
+
+        urls = [f"{self.base_url}/products/{h}.json" for h in all_handles]
+        log.info(
+            "URLs Shapermint (fallback par-collection)",
+            collections=len(target_collections), urls=len(urls),
         )
         return urls
 
@@ -167,6 +296,7 @@ class ShapermintConnector(BaseConnector):
             if isinstance(tags_raw, str)
             else list(tags_raw)
         )
+
         fv      = variants[0] if variants else {}
         price   = normalize_price(fv.get("price"))
         compare = normalize_price(fv.get("compare_at_price"))
@@ -175,10 +305,10 @@ class ShapermintConnector(BaseConnector):
         category_raw = p.get("product_type") or next(
             (t for t in tags if map_category_sm(t)), None
         )
-        materials          = extract_materials(p.get("body_html"))
+        materials            = extract_materials(p.get("body_html"))
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
-        detailed_variants  = extract_variants_detailed(variants, options)
-        availability       = normalize_availability(variants)
+        detailed_variants    = extract_variants_detailed(variants, options)
+        availability         = normalize_availability(variants)
 
         return RawProduct(
             external_id=str(p.get("id", p.get("handle", ""))),
@@ -199,13 +329,13 @@ class ShapermintConnector(BaseConnector):
             rating=rating,
             review_count=review_count,
             extra={
-                "handle":           p.get("handle"),
-                "tags":             tags,
-                "vendor":           p.get("vendor"),
-                "is_best_seller":   extract_best_seller_sm(
+                "handle":            p.get("handle"),
+                "tags":              tags,
+                "vendor":            p.get("vendor"),
+                "is_best_seller":    extract_best_seller_sm(
                     tags, self._config.get("best_seller_tags")
                 ),
-                "materials":        materials,
+                "materials":         materials,
                 "detailed_variants": detailed_variants,
             },
         )
