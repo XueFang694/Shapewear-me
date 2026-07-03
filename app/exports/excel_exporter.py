@@ -6,6 +6,9 @@ Ordre de tri :
   2. Nom          — alphabétique
   3. Taille       — ordre vêtement standard (XS < S < M < L < XL < XXL …
                     puis numériques 0-30+, puis alpha résiduels)
+
+Feuilles exportées : uniquement « Produits ».
+Les feuilles Synthèse, Nouveautés, Promotions et Suppressions sont supprimées.
 """
 from __future__ import annotations
 
@@ -14,8 +17,6 @@ from typing import Any
 
 import pandas as pd
 
-# Feuilles à ne jamais exporter
-_EXCLUDED_SHEETS = {"Synthèse", "Nouveautés", "Promotions", "Suppressions"}
 
 # ---------------------------------------------------------------------------
 # Ordre de tri des tailles
@@ -125,41 +126,34 @@ class ExcelExporter:
     """
     Génère le fichier Excel de veille concurrentielle.
 
-    Feuilles produites :
-        Produits   — catalogue complet, trié Marque / Nom / Taille
+    Feuille produite : « Produits » uniquement, triée Marque / Nom / Taille.
+    Les feuilles Synthèse, Nouveautés, Promotions et Suppressions ne sont
+    plus exportées.
     """
 
-    def export(
+    def export_from_db(
         self,
         rows: list[dict],
         output_path: str,
         *,
         sheet_name: str = "Produits",
-        extra_sheets: dict[str, list[dict]] | None = None,
     ) -> None:
+        """
+        Écrit le fichier Excel à partir d'une liste de lignes dict.
+
+        Args:
+            rows:        Lignes de données (une par variante produit).
+            output_path: Chemin du fichier .xlsx à créer.
+            sheet_name:  Nom de la feuille (défaut : "Produits").
+        """
         df_main = pd.DataFrame(rows)
         df_main = _sort_products_df(df_main)
-
-        # Filtrer les feuilles exclues
-        filtered_extras = {
-            name: sheet_rows
-            for name, sheet_rows in (extra_sheets or {}).items()
-            if name not in _EXCLUDED_SHEETS
-        }
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             df_main.to_excel(writer, sheet_name=sheet_name, index=False)
 
-            for name, sheet_rows in filtered_extras.items():
-                pd.DataFrame(sheet_rows).to_excel(
-                    writer, sheet_name=name, index=False
-                )
-
         _apply_formatting(output_path, sheet_name)
 
-    # Alias pour compatibilité avec les appels existants à export_from_db()
-    def export_from_db(self, *args, **kwargs) -> None:
-        return self.export(*args, **kwargs)
 
 def _apply_formatting(path: str, products_sheet: str) -> None:
     """Applique le formatage de base (largeurs de colonnes, en-têtes gras)."""
