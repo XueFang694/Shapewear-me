@@ -1,10 +1,15 @@
 """
-Connecteur SPANX v2 — extraction enrichie avec fallback HTML pour la disponibilité.
+Connecteur SPANX v3.1 — matières, Best Seller et compression depuis le HTML.
 
-CORRECTIF v2.1 : ajout du fallback HTML pour la disponibilité.
-Certains stores Shopify (dont SPANX) masquent inventory_quantity dans leur API JSON.
-Quand toutes les variantes remontent "available=False" avec qty=None, on fetch
-la page HTML du produit pour extraire la vraie disponibilité.
+CORRECTIF v3.1 (ajout) :
+  - Compression : niveau de compression extrait depuis le payload RSC HTML
+    ("light" | "medium" | "strong" | "extra_strong") et stocké dans
+    extra["compression_level"] pour transmission au Normalizer / classifier.
+
+CORRECTIF v3 (conservé) :
+  - Matières : extraites depuis le payload RSC (non disponibles via l'API JSON).
+  - Best Seller : badge détecté depuis le payload RSC.
+  - Un seul fetch HTML par produit (mutualisé pour les trois champs).
 """
 from __future__ import annotations
 
@@ -13,8 +18,13 @@ from typing import Any
 
 from app.connectors.base import BaseConnector, Category, ConnectorMeta, RawProduct
 from app.connectors.spanx.mappings import extract_best_seller, map_category
+from app.connectors.spanx.html_utils import (
+    extract_materials_from_spanx_html,
+    extract_is_best_seller_from_spanx_html,
+    extract_compression_from_spanx_html,
+)
 from app.scraping.shopify_utils import (
-    clean_description, extract_colors, extract_materials,
+    clean_description, extract_colors,
     extract_rating_and_reviews, extract_sizes, extract_variants_detailed,
     normalize_availability, extract_availability_from_html,
     normalize_price,
@@ -33,7 +43,7 @@ class SpanxConnector(BaseConnector):
 
     def get_metadata(self) -> ConnectorMeta:
         return ConnectorMeta(
-            name="SPANX", slug="spanx", version="2.1",
+            name="SPANX", slug="spanx", version="3.1",
             engine="shopify_json", base_url=self.base_url,
         )
 
@@ -109,8 +119,8 @@ class SpanxConnector(BaseConnector):
         on_sale = False
         if variants:
             fv = variants[0]
-            price    = normalize_price(fv.get("price"))
-            compare  = normalize_price(fv.get("compare_at_price"))
+            price   = normalize_price(fv.get("price"))
+            compare = normalize_price(fv.get("compare_at_price"))
             if compare and price and compare > price:
                 original_price = compare
                 on_sale = True
@@ -122,38 +132,50 @@ class SpanxConnector(BaseConnector):
                     category_raw = tag
                     break
 
-        materials = extract_materials(p.get("body_html"))
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
         detailed_variants = extract_variants_detailed(variants, options)
         images = [img["src"] for img in p.get("images", []) if img.get("src")]
 
-        # Disponibilité : utiliser la logique enrichie
-        availability = normalize_availability(variants)
+        # ── Un seul fetch HTML — mutualisé pour tous les champs HTML ─────
+        html_content = self._fetch_product_html(url)
 
-        # Fallback HTML si toutes les variantes remontent "hors stock"
-        # ET que inventory_quantity est absent (masqué par Shopify)
-        if availability == "out_of_stock" and self._all_qty_missing(variants):
-            html_url = url.replace(".json", "")
-            try:
-                from app.scraping.http_client import HttpClient
-                client = HttpClient(
-                    delay_min=self.delay_min,
-                    delay_max=self.delay_max,
-                    headers=self._config.get("headers", {}),
+        # ── Disponibilité ─────────────────────────────────────────────────
+        availability = normalize_availability(variants)
+        if (availability == "out_of_stock" and self._all_qty_missing(variants)
+                and html_content):
+            html_avail = extract_availability_from_html(html_content)
+            if html_avail != "unknown":
+                log.debug(
+                    "Disponibilité corrigée via HTML",
+                    brand="spanx", url=url, availability=html_avail,
                 )
-                response = client.get(html_url, timeout=20)
-                if response.status_code == 200:
-                    html_avail = extract_availability_from_html(response.text)
-                    if html_avail != "unknown":
-                        availability = html_avail
-                        log.debug(
-                            "Disponibilité corrigée via HTML",
-                            brand="spanx",
-                            url=url,
-                            availability=availability,
-                        )
-            except Exception as exc:
-                log.debug("Fallback HTML échoué", url=url, error=str(exc))
+                availability = html_avail
+
+        # ── Matières ──────────────────────────────────────────────────────
+        materials = extract_materials_from_spanx_html(html_content)
+        if materials:
+            log.debug(
+                "Matières extraites via HTML",
+                brand="spanx", url=url, main=materials.get("material_main"),
+            )
+        else:
+            from app.scraping.shopify_utils import extract_materials as _json_mat
+            materials = _json_mat(p.get("body_html"))
+
+        # ── Best Seller ───────────────────────────────────────────────────
+        is_best_seller = extract_is_best_seller_from_spanx_html(html_content)
+        if is_best_seller:
+            log.debug("Best Seller détecté via HTML", brand="spanx", url=url)
+        else:
+            is_best_seller = extract_best_seller(tags)
+
+        # ── Niveau de compression ─────────────────────────────────────────
+        compression_level = extract_compression_from_spanx_html(html_content)
+        if compression_level:
+            log.debug(
+                "Compression extraite via HTML",
+                brand="spanx", url=url, level=compression_level,
+            )
 
         return RawProduct(
             external_id=str(p.get("id", p.get("handle", ""))),
@@ -177,15 +199,46 @@ class SpanxConnector(BaseConnector):
                 "handle":            p.get("handle"),
                 "tags":              tags,
                 "vendor":            p.get("vendor"),
-                "is_best_seller":    extract_best_seller(tags),
+                "is_best_seller":    is_best_seller,
                 "materials":         materials,
+                "compression_level": compression_level,
                 "detailed_variants": detailed_variants,
             },
         )
 
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _fetch_product_html(self, json_url: str) -> str:
+        """
+        Fetch la page HTML d'un produit Spanx depuis son URL JSON.
+        Retourne une chaîne vide en cas d'échec (non bloquant).
+        Ce fetch unique est mutualisé pour disponibilité + matières +
+        best seller + compression.
+        """
+        html_url = json_url.replace(".json", "")
+        try:
+            from app.scraping.http_client import HttpClient
+            client = HttpClient(
+                delay_min=self.delay_min,
+                delay_max=self.delay_max,
+                headers=self._config.get("headers", {}),
+            )
+            response = client.get(html_url, timeout=30)
+            if response.status_code == 200:
+                return response.text
+            log.debug(
+                "Fetch HTML produit échoué",
+                brand="spanx", url=html_url, status=response.status_code,
+            )
+        except Exception as exc:
+            log.debug(
+                "Fetch HTML produit exception",
+                brand="spanx", url=html_url, error=str(exc),
+            )
+        return ""
+
     @staticmethod
     def _all_qty_missing(variants: list[dict]) -> bool:
-        """Vérifie si inventory_quantity est absent sur toutes les variantes."""
         if not variants:
             return False
         return all(v.get("inventory_quantity") is None for v in variants)

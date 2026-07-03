@@ -6,8 +6,8 @@ version: "1.0"
 # Moteur : shopify_json = endpoint /products.json (API Shopify)
 engine: shopify_json
 rate_limit_rps: 0.5
-delay_min: 1.5
-delay_max: 4.0
+delay_min: 2.5
+delay_max: 6.0
 
 pagination:
   type: offset
