@@ -1,12 +1,12 @@
 name: SKIMS
 slug: skims
 base_url: https://skims.com
-version: "2.0"
+version: "2.1"
 
-# SKIMS utilise un frontend headless (Hydrogen/Shopify) — les endpoints
-# /collections/<slug>/products.json retournent tous 403/404.
-# Stratégie : fetch HTML des pages de collection + extraction du payload
-# JSON embarqué (__NEXT_DATA__, window.__remixContext, ou script JSON-LD).
+# SKIMS utilise Shopify Hydrogen (frontend headless).
+# Tous les endpoints /products.json et /collections/*.json sont bloqués.
+# Stratégie : fetch HTML des pages de collection + extraction JSON-LD.
+# La pagination utilise un cursor opaque exposé dans le JSON-LD ("nextPage").
 engine: shopify_json
 
 rate_limit_rps: 0.35
@@ -14,16 +14,9 @@ delay_min: 2.5
 delay_max: 6.0
 
 pagination:
-  type: offset
-  param: page
-  page_size: 24   # SKIMS affiche 24 produits par page en SSR
-  max_pages: 50
+  max_pages: 50   # Nombre max de pages cursor par collection
 
-product_list_endpoint: /collections
-
-# Collections SKIMS vérifiées (slugs réels du site, juillet 2026).
-# L'ancien endpoint /collections/<slug>/products.json est bloqué.
-# On fetch la page HTML /collections/<slug> directement.
+# Collections SKIMS (slugs réels vérifiés juillet 2026).
 target_collections:
   - shapewear
   - shapewear-bodysuits
@@ -39,7 +32,9 @@ best_seller_tags:
   - "top rated"
   - "fan favorite"
   - "fan-favourite"
+  - "best-seller-collection"
 
+# Headers HTML — nécessaires pour passer le WAF Cloudflare de SKIMS
 headers:
   Accept-Language: en-US,en;q=0.9
   Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
