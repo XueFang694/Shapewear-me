@@ -1,49 +1,40 @@
 """
-Connecteur SKIMS v2.1 — parsing JSON-LD depuis pages HTML de collection.
+Connecteur SKIMS v2.2 — parsing CollectionPage JSON-LD + pagination <link rel="next">.
 
-CONTEXTE
-────────
-SKIMS utilise Shopify Hydrogen (frontend headless) qui bloque tous les
-endpoints Shopify publics :
-  - /collections/<slug>/products.json  → 403/404
-  - /products/<handle>.json            → 404
+CHANGEMENTS v2.2 (correctif)
+─────────────────────────────
+v2.1 ne trouvait aucun produit pour deux raisons :
 
-STRATÉGIE
-─────────
-1. GET /collections/<slug>  → HTML avec JSON-LD embarqué
-2. Extraction des produits depuis les blocs <script application/ld+json>
-3. Pagination cursor : le JSON-LD expose une propriété "nextPage" avec
-   l'URL de la page suivante (ex: /en-fr/collections/shapewear?cursor=eyJ...)
-4. Cache interne handle → données produit
-5. get_product_urls() retourne des URLs virtuelles skims://product/<handle>
-6. ScrapingEngine détecte le schéma non-HTTP et appelle parse_product()
-   directement sans fetch réseau (cf. engine.py)
-7. Zéro fetch produit individuel : toutes les données viennent du JSON-LD
+1. Structure JSON-LD mal comprise.
+   SKIMS Hydrogen expose les produits dans :
+     CollectionPage > mainEntity (ItemList) > itemListElement (ListItem[])
+   Chaque ListItem a :  @type, position, url, name, image
+   — PAS de @type:"Product" direct, contrairement à ce que cherchait v2.1.
+   Le nom suit le format "PRODUCT NAME | COLOR".
+   L'URL est relative : "/products/<base-handle>-<color-slug>"
 
-STRUCTURE JSON-LD SKIMS (Shopify Hydrogen) :
-  {
-    "@type": "Product",
-    "name":  "Seamless Sculpt Thong Bodysuit",
-    "url":   "https://skims.com/en-fr/products/seamless-sculpt-thong-bodysuit",
-    "image": ["https://cdn.shopify.com/..."],
-    "offers": {
-      "@type": "AggregateOffer",
-      "lowPrice": "88.00",
-      "priceCurrency": "USD",
-      "offers": [
-        {
-          "@type": "Offer",
-          "url": "https://skims.com/en-fr/products/seamless-sculpt-thong-bodysuit-onyx",
-          "price": "88.00",
-          "availability": "http://schema.org/InStock"
-        }
-      ]
-    }
-  }
-  + bloc separé { "@type": "CollectionPage", "nextPage": "https://..." }
+2. Pagination par curseur non trouvée.
+   v2.1 cherchait une clé "nextPage" dans le JSON-LD.
+   En réalité SKIMS expose le curseur via un tag HTML :
+     <link rel="next" href="https://skims.com/collections/<slug>?cursor=...">
 
-Le handle produit propre (sans couleur) est dans item["url"],
-PAS dans offers[i]["url"] qui contient le slug de variante avec coloris.
+STRATÉGIE v2.2
+──────────────
+• get_product_urls() :
+    - Fetch HTML de la page de collection
+    - Extrait les produits depuis CollectionPage > mainEntity > itemListElement
+    - Extrait le curseur depuis <link rel="next" href="...">
+    - Déduplique par handle de base (en retirant le suffixe couleur du handle)
+    - Stocke les données en cache et retourne des URLs virtuelles
+
+• parse_product() :
+    - URL virtuelle skims://product/<handle> → lit le cache (zéro fetch HTTP)
+    - dict Shopify → compatibilité tests
+    - str HTML → fallback extraction JSON-LD
+
+• Prix : non disponible dans la page de collection JSON-LD.
+  Récupération via /products/<handle>.json si l'endpoint est accessible,
+  sinon le prix reste None (comportement dégradé acceptable pour la veille).
 """
 from __future__ import annotations
 
@@ -66,6 +57,12 @@ _JSON_LD_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Curseur de pagination : <link rel="next" href="https://skims.com/...?cursor=...">
+_LINK_NEXT_RE = re.compile(
+    r'<link\s+rel=["\']next["\']\s+href=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
 _SKIMS_BS_TAGS = frozenset({
     "best seller", "bestseller", "best-seller",
     "top rated", "fan favorite", "fan-favourite",
@@ -74,7 +71,7 @@ _SKIMS_BS_TAGS = frozenset({
 
 
 class SkimsConnector(BaseConnector):
-    """Connecteur SKIMS v2.1 — JSON-LD + URLs virtuelles, zéro fetch .json."""
+    """Connecteur SKIMS v2.2 — CollectionPage JSON-LD + <link rel=next>."""
 
     def __init__(self, config_path: Path | None = None):
         super().__init__(config_path=config_path or _CONFIG_PATH)
@@ -82,7 +79,7 @@ class SkimsConnector(BaseConnector):
 
     def get_metadata(self) -> ConnectorMeta:
         return ConnectorMeta(
-            name="SKIMS", slug="skims", version="2.1",
+            name="SKIMS", slug="skims", version="2.2",
             engine="shopify_json", base_url=self.base_url,
         )
 
@@ -97,10 +94,12 @@ class SkimsConnector(BaseConnector):
             for slug in self._config.get("target_collections", [])
         ]
 
+    # ── URLs produits ─────────────────────────────────────────────────────
+
     def get_product_urls(self, category: Category) -> list[str]:
         """
-        Pagine les pages HTML via cursor JSON-LD.
-        Retourne des URLs virtuelles skims://product/<handle>.
+        Pagine les pages HTML de collection via curseur <link rel="next">.
+        Retourne des URLs virtuelles skims://product/<base-handle>.
         """
         from app.scraping.http_client import HttpClient
 
@@ -111,7 +110,7 @@ class SkimsConnector(BaseConnector):
         )
 
         max_pages     = self._config.get("pagination", {}).get("max_pages", 50)
-        seen:         set[str]  = set()
+        seen:         set[str]  = set()     # base handles déjà vus
         virtual_urls: list[str] = []
         next_url:     str | None = f"{self.base_url}/collections/{category.slug}"
         page_num      = 0
@@ -121,20 +120,31 @@ class SkimsConnector(BaseConnector):
             try:
                 resp = client.get(next_url)
             except Exception as exc:
-                log.error("SKIMS erreur requête", category=category.slug, page=page_num, error=str(exc))
+                log.error(
+                    "SKIMS erreur requête collection",
+                    category=category.slug, page=page_num, error=str(exc),
+                )
                 break
 
             if resp.status_code == 404:
-                log.warning("SKIMS collection 404", category=category.slug, url=next_url)
+                log.warning(
+                    "SKIMS collection 404",
+                    category=category.slug, url=next_url,
+                )
                 break
             if resp.status_code != 200:
-                log.warning("SKIMS collection inaccessible", category=category.slug, status=resp.status_code)
+                log.warning(
+                    "SKIMS collection inaccessible",
+                    category=category.slug,
+                    status=resp.status_code,
+                )
                 break
 
-            products, next_page_url = self._extract_from_json_ld(resp.text)
+            html = resp.text
+            products_raw, cursor_next = self._extract_from_html(html)
             new_this_page = 0
 
-            for p in products:
+            for p in products_raw:
                 handle = p.get("handle", "")
                 if not handle or handle in seen:
                     continue
@@ -145,26 +155,28 @@ class SkimsConnector(BaseConnector):
 
             log.debug(
                 "SKIMS page collection traitée",
-                category=category.slug, page=page_num,
-                new_products=new_this_page, total_handles=len(virtual_urls),
+                category=category.slug,
+                page=page_num,
+                new_products=new_this_page,
+                total_handles=len(virtual_urls),
             )
 
-            if not next_page_url or new_this_page == 0:
+            # Pagination : <link rel="next"> dans le HTML
+            if not cursor_next or new_this_page == 0:
                 break
-            next_url = next_page_url
+            next_url = cursor_next
 
         log.info(
             "URLs SKIMS collectées",
-            category=category.slug, count=len(virtual_urls), pages=page_num,
+            category=category.slug,
+            count=len(virtual_urls),
+            pages=page_num,
         )
         return virtual_urls
 
+    # ── Parsing produit ───────────────────────────────────────────────────
+
     def parse_product(self, url: str, data: str | dict) -> RawProduct:
-        """
-        - skims://product/<handle> → cache (chemin normal, zéro HTTP)
-        - dict Shopify → parsing direct (tests)
-        - str HTML → extraction JSON-LD (fallback)
-        """
         if url.startswith("skims://product/"):
             handle = url.removeprefix("skims://product/")
             product_data = self._product_cache.get(handle)
@@ -179,23 +191,41 @@ class SkimsConnector(BaseConnector):
             return self._parse_shopify_dict(url, data)
 
         if isinstance(data, str):
-            products, _ = self._extract_from_json_ld(data)
+            products, _ = self._extract_from_html(data)
             if products:
                 return self._build_raw_product(products[0])
-            raise ConnectorParseError("Impossible de parser le HTML SKIMS", context={"url": url})
+            raise ConnectorParseError(
+                "Impossible de parser le HTML SKIMS",
+                context={"url": url},
+            )
 
-        raise ConnectorParseError(f"Type inattendu : {type(data)}", context={"url": url})
+        raise ConnectorParseError(
+            f"Type inattendu : {type(data)}",
+            context={"url": url},
+        )
 
-    # ── Extraction JSON-LD ────────────────────────────────────────────────
+    # ── Extraction depuis le HTML ─────────────────────────────────────────
 
-    def _extract_from_json_ld(self, html: str) -> tuple[list[dict], str | None]:
+    def _extract_from_html(self, html: str) -> tuple[list[dict], str | None]:
         """
-        Parse tous les blocs JSON-LD de la page.
-        Retourne (products, next_page_url).
+        Extrait les produits et le lien de pagination depuis une page HTML SKIMS.
+
+        Produits : CollectionPage > mainEntity (ItemList) > itemListElement (ListItem[])
+          Chaque ListItem : { @type, position, url, name, image }
+          name = "PRODUCT NAME | COLOR"
+          url  = "/products/<base-handle>-<color-slug>"
+
+        Pagination : <link rel="next" href="https://skims.com/...?cursor=...">
         """
         products:      list[dict] = []
         next_page_url: str | None = None
 
+        # ── Curseur de pagination depuis <link rel="next"> ────────────────
+        m_next = _LINK_NEXT_RE.search(html)
+        if m_next:
+            next_page_url = m_next.group(1)
+
+        # ── Produits depuis le JSON-LD CollectionPage ─────────────────────
         for m in _JSON_LD_RE.finditer(html):
             raw = m.group(1).strip()
             if not raw:
@@ -205,116 +235,92 @@ class SkimsConnector(BaseConnector):
             except json.JSONDecodeError:
                 continue
 
-            items = data if isinstance(data, list) else [data]
+            if not isinstance(data, dict):
+                continue
 
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
+            if data.get("@type") != "CollectionPage":
+                continue
 
-                dtype = item.get("@type", "")
+            main_entity = data.get("mainEntity", {})
+            if main_entity.get("@type") != "ItemList":
+                continue
 
-                if dtype == "Product":
-                    p = self._parse_json_ld_product(item)
-                    if p:
-                        products.append(p)
-
-                elif dtype == "ItemList":
-                    for el in item.get("itemListElement", []):
-                        node = el.get("item", el) if isinstance(el, dict) else el
-                        if isinstance(node, dict) and node.get("@type") == "Product":
-                            p = self._parse_json_ld_product(node)
-                            if p:
-                                products.append(p)
-
-                # nextPage peut être sur n'importe quel bloc JSON-LD
-                np = item.get("nextPage") or item.get("next")
-                if isinstance(np, str) and np.startswith("http"):
-                    next_page_url = np
+            for list_item in main_entity.get("itemListElement", []):
+                p = self._parse_list_item(list_item)
+                if p:
+                    products.append(p)
 
         if products:
-            log.debug("SKIMS handles extraits via JSON-LD", count=len(products), has_next=bool(next_page_url))
+            log.debug(
+                "SKIMS produits extraits (CollectionPage JSON-LD)",
+                count=len(products),
+                has_next=bool(next_page_url),
+            )
 
         return products, next_page_url
 
-    def _parse_json_ld_product(self, item: dict) -> dict | None:
+    def _parse_list_item(self, item: dict) -> dict | None:
         """
-        Extrait les données d'un objet JSON-LD Product SKIMS.
+        Parse un ListItem SKIMS en dict produit interne.
 
-        IMPORTANT : le handle est extrait depuis item["url"] (URL produit
-        canonique, sans couleur), jamais depuis les URLs d'offres/variantes
-        qui contiennent le coloris (ex: ...-onyx, ...-clay).
+        Format d'entrée :
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "url": "/products/cool-shapewear-high-waisted-short-clay",
+            "name": "COOL SHAPEWEAR HIGH-WAISTED SHORT | CLAY",
+            "image": "https://cdn.shopify.com/..."
+          }
+
+        Stratégie handle de base :
+          name = "PRODUCT NAME | COLOR"
+          color_slug = color.lower().replace(' ', '-')
+          url_handle = url.split('/products/')[-1]
+          Si url_handle se termine par '-'+color_slug → le retirer
         """
-        product_url = item.get("url", "")
-        if not product_url:
+        if item.get("@type") != "ListItem":
             return None
 
-        handle = self._url_to_handle(product_url)
-        if not handle:
+        raw_url = item.get("url", "")
+        name    = item.get("name", "").strip()
+        image   = item.get("image", "")
+
+        if not raw_url or not name:
             return None
 
-        title = item.get("name", "").strip()
-        if not title:
+        # Séparer "PRODUCT NAME | COLOR"
+        parts        = name.split(" | ", 1)
+        product_name = parts[0].strip().title()
+        color        = parts[1].strip() if len(parts) > 1 else ""
+
+        # Extraire le handle complet (avec couleur) depuis l'URL
+        url_handle = raw_url.split("/products/")[-1].strip("/").split("?")[0]
+
+        # Retirer le suffixe couleur pour obtenir le handle de base
+        color_slug = color.lower().replace(" ", "-")
+        if color_slug and url_handle.endswith("-" + color_slug):
+            base_handle = url_handle[: -(len(color_slug) + 1)]
+        else:
+            base_handle = url_handle
+
+        if not base_handle:
             return None
 
-        # ── Prix et disponibilité ─────────────────────────────────────────
-        price        = None
-        compare      = None
-        availability = "in_stock"
-        offers_raw   = item.get("offers", {})
-
-        if isinstance(offers_raw, dict):
-            otype = offers_raw.get("@type", "")
-            if otype == "AggregateOffer":
-                price = normalize_price(
-                    offers_raw.get("lowPrice") or offers_raw.get("price")
-                )
-                sub = offers_raw.get("offers", [])
-                if sub and isinstance(sub, list) and isinstance(sub[0], dict):
-                    avail = sub[0].get("availability", "")
-                    if "OutOfStock" in avail or "Discontinued" in avail:
-                        availability = "out_of_stock"
-            elif otype == "Offer":
-                price = normalize_price(offers_raw.get("price"))
-                compare = normalize_price(offers_raw.get("highPrice"))
-                if "OutOfStock" in offers_raw.get("availability", ""):
-                    availability = "out_of_stock"
-
-        elif isinstance(offers_raw, list) and offers_raw:
-            first = offers_raw[0]
-            if isinstance(first, dict):
-                price   = normalize_price(first.get("price"))
-                compare = normalize_price(first.get("highPrice") or first.get("compareAtPrice"))
-                if "OutOfStock" in first.get("availability", ""):
-                    availability = "out_of_stock"
-
-        # ── Images ───────────────────────────────────────────────────────
-        images: list[dict] = []
-        for img in (item.get("image", []) if isinstance(item.get("image"), list) else [item.get("image", "")]):
-            if isinstance(img, str) and img.startswith("http"):
-                images.append({"src": img})
-            elif isinstance(img, dict):
-                src = img.get("url") or img.get("src", "")
-                if src:
-                    images.append({"src": src})
-
-        # ── ID produit ───────────────────────────────────────────────────
-        product_id = item.get("productID") or item.get("sku") or ""
-        if not product_id:
-            gid = str(item.get("@id") or item.get("identifier", ""))
-            if "gid://shopify/Product/" in gid:
-                product_id = gid.split("/")[-1]
+        # Déduire la catégorie depuis le handle
+        category_raw = self._category_from_handle(base_handle)
 
         return {
-            "handle":           handle,
-            "title":            title,
-            "price":            price,
-            "compare_at_price": compare if (compare and price and compare > price) else None,
-            "images":           images,
-            "tags":             [],
-            "id":               str(product_id),
-            "product_type":     item.get("category") or item.get("productType"),
-            "availability":     availability,
-            "_raw":             item,
+            "handle":       base_handle,
+            "handle_color": url_handle,   # handle complet avec couleur (pour info)
+            "title":        product_name,
+            "color":        color,
+            "price":        None,         # non disponible dans la page collection
+            "compare_at_price": None,
+            "images":       [{"src": image}] if image else [],
+            "tags":         [],
+            "id":           "",           # non disponible — sera le handle
+            "product_type": category_raw,
+            "availability": "in_stock",   # présent dans la collection = dispo
         }
 
     # ── Constructeur RawProduct ───────────────────────────────────────────
@@ -325,7 +331,11 @@ class SkimsConnector(BaseConnector):
         compare = p.get("compare_at_price")
         on_sale = bool(compare and price and compare > price)
         tags    = p.get("tags", [])
-        images  = [img["src"] for img in p.get("images", []) if isinstance(img, dict) and img.get("src")]
+        images  = [
+            img["src"]
+            for img in p.get("images", [])
+            if isinstance(img, dict) and img.get("src")
+        ]
 
         return RawProduct(
             external_id=p.get("id") or handle,
@@ -340,11 +350,15 @@ class SkimsConnector(BaseConnector):
             description=None,
             images=images,
             sizes=[],
-            colors=[],
+            colors=(
+                [{"name": p["color"], "available": True, "sku": ""}]
+                if p.get("color") else []
+            ),
             variants=[],
             availability=p.get("availability", "in_stock"),
             extra={
                 "handle":         handle,
+                "handle_color":   p.get("handle_color", handle),
                 "tags":           tags,
                 "vendor":         "skims",
                 "is_best_seller": self._is_best_seller(tags),
@@ -360,7 +374,11 @@ class SkimsConnector(BaseConnector):
         )
         variants = p.get("variants", [])
         tags_raw = p.get("tags", [])
-        tags = [t.strip() for t in tags_raw.split(",")] if isinstance(tags_raw, str) else list(tags_raw)
+        tags = (
+            [t.strip() for t in tags_raw.split(",")]
+            if isinstance(tags_raw, str)
+            else list(tags_raw)
+        )
         fv      = variants[0] if variants else {}
         price   = normalize_price(fv.get("price"))
         compare = normalize_price(fv.get("compare_at_price"))
@@ -372,47 +390,51 @@ class SkimsConnector(BaseConnector):
             brand_slug="skims",
             price=price,
             original_price=compare if on_sale else None,
-            currency="USD", on_sale=on_sale,
-            category_raw=p.get("product_type") or next((t for t in tags if map_category_skims(t)), None),
+            currency="USD",
+            on_sale=on_sale,
+            category_raw=p.get("product_type") or next(
+                (t for t in tags if map_category_skims(t)), None
+            ),
             description=clean_description(p.get("body_html")),
             images=[img["src"] for img in p.get("images", []) if img.get("src")],
-            sizes=[], colors=extract_colors(variants),
+            sizes=[],
+            colors=extract_colors(variants),
             variants=extract_variants_detailed(variants, p.get("options", [])),
             availability=normalize_availability(variants),
             extra={
-                "handle": p.get("handle"), "tags": tags, "vendor": p.get("vendor"),
-                "is_best_seller": extract_best_seller_skims(tags, self._config.get("best_seller_tags")),
-                "materials": extract_materials(p.get("body_html")),
+                "handle":         p.get("handle"),
+                "tags":           tags,
+                "vendor":         p.get("vendor"),
+                "is_best_seller": extract_best_seller_skims(
+                    tags, self._config.get("best_seller_tags")
+                ),
+                "materials":      extract_materials(p.get("body_html")),
             },
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
     @staticmethod
-    def _url_to_handle(url: str) -> str:
-        """
-        Extrait le handle depuis une URL SKIMS, en retirant le locale.
-        https://skims.com/en-fr/products/seamless-sculpt-thong-bodysuit
-          → seamless-sculpt-thong-bodysuit
-        """
-        if "/products/" not in url:
-            return ""
-        return url.split("/products/")[-1].strip("/").split("?")[0]
-
-    @staticmethod
     def _category_from_handle(handle: str) -> str | None:
-        """Déduit la catégorie depuis le handle produit."""
         h = handle.lower()
-        if "bodysuit" in h:               return "bodywear"
-        if "bra" in h:                    return "bras"
+        if "bodysuit" in h:
+            return "bodywear"
+        if "bra" in h:
+            return "bras"
         if "thong" in h or "brief" in h or "cheekini" in h or "underwear" in h:
-                                          return "underwear"
-        if "short" in h:                  return "shorts"
-        if "legging" in h or "pant" in h: return "leggings"
-        if "swim" in h:                   return "swim"
-        if "cami" in h or "tank" in h:    return "loungewear"
+            return "underwear"
+        if "short" in h or "capri" in h:
+            return "shorts"
+        if "legging" in h or "pant" in h:
+            return "leggings"
+        if "swim" in h:
+            return "swim"
+        if "cami" in h or "tank" in h:
+            return "loungewear"
         return None
 
     def _is_best_seller(self, tags: list[str]) -> bool:
         config_tags = {t.lower() for t in self._config.get("best_seller_tags", [])}
-        return any(t.strip().lower() in (_SKIMS_BS_TAGS | config_tags) for t in tags)
+        return any(
+            t.strip().lower() in (_SKIMS_BS_TAGS | config_tags) for t in tags
+        )
