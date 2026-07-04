@@ -1,42 +1,49 @@
 name: Shapermint
 slug: shapermint
 base_url: https://shapermint.com
-version: "1.1"
+version: "1.5"
 engine: shopify_json
+
+# Shapermint est un frontend Next.js SSR custom (Trafilea).
+# Les endpoints Shopify publics sont TOUS bloqués (404) :
+#   /products.json, /collections/<slug>/products.json
+#
+# Stratégie fonctionnelle :
+#   1. GET /collections/<slug>?page=N  → HTML avec __NEXT_DATA__ JSON embarqué
+#      → pageProps.products  (20 produits/page, prix, tags, images, couleurs)
+#      → pageProps.pagination.total_pages
+#   2. GET /products/<slug>.json       → variants complets (tailles, description)
+#
+# Les collections ci-dessous correspondent aux vrais slugs du site.
+target_collections:
+  - shapewear
+  - bodysuits
+  - shorts
+  - leggings
+  - bras
+  - underwear
+  - tanks-camis
+  - waist-trainers
+
 rate_limit_rps: 0.3
 delay_min: 2.5
 delay_max: 6.0
 
-# Shapermint bloque les endpoints /collections/<slug>/products.json (→ 404).
-# On utilise l'endpoint global /products.json qui liste tous les produits,
-# puis on filtre par product_type côté connecteur.
-# Le champ pagination_strategy permet au connecteur de choisir la bonne
-# stratégie sans toucher au code du mixin partagé.
-pagination_strategy: global     # "global" = /products.json , "collection" = /collections/<slug>/products.json
-
 pagination:
-  type: offset
-  param: page
-  page_size: 250
-  max_pages: 100
+  page_size: 20    # Shapermint fixe 20 produits/page côté SSR
+  max_pages: 20    # Sécurité : 20 × 20 = 400 produits max par collection
 
-product_list_endpoint: /products.json
+# Tags Shopify signalant un Best Seller chez Shapermint
+best_seller_tags:
+  - "product-label-best-seller"
+  - "section-best-seller"
+  - "winning-product"
+  - "best seller"
+  - "bestseller"
+  - "top seller"
+  - "popular"
 
-# Catégories visibles sur shapermint.com/collections/<slug>
-# Utilisées uniquement pour le filtrage par product_type dans le parsing,
-# pas pour construire les URLs de pagination (voir pagination_strategy).
-target_collections:
-  - bodysuits
-  - shorts
-  - bras
-  - underwear
-  - leggings
-  - tanks-camis
-  - shapewear
-  - waist-trainers
-
-# product_type Shopify → famille interne.
-# Shapermint stocke plusieurs marques ; on ne garde que les types shapewear.
+# Types de produits conservés (filtre sur product_type du .json individuel)
 target_product_types:
   - Bodysuits
   - Bodysuit
@@ -55,13 +62,7 @@ target_product_types:
   - Full Body Shapers
   - Slips
 
-best_seller_tags:
-  - "best seller"
-  - bestseller
-  - "top seller"
-  - popular
-
 headers:
   Accept-Language: en-US,en;q=0.9
-  Accept: text/html,application/json
+  Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
   User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36
