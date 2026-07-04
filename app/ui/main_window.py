@@ -9,6 +9,10 @@ Navigation latérale à 5 sections :
   - Paramètres  : configuration de l'application
 
 Pattern MVP : la fenêtre orchestre les vues, la logique métier est dans les workers.
+
+Changements v2.1 :
+  - Bouton Excel → ouvre ExcelExportDialog pour choisir la/les marque(s) à exporter.
+  - ExcelExportDialog : checkboxes par marque + option "Toutes" + un fichier par marque.
 """
 from __future__ import annotations
 
@@ -20,6 +24,9 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from PySide6.QtGui import QAction, QFont, QIcon, QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -27,6 +34,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QStatusBar,
@@ -39,6 +47,183 @@ from app.core.events import event_bus
 from app.core.logger import get_logger
 
 log = get_logger(__name__)
+
+_BRAND_COLORS = {
+    "spanx":      "#1B3A6B",
+    "skims":      "#C8A882",
+    "honeylove":  "#C0392B",
+    "shapermint": "#27AE60",
+    "wacoal":     "#3727AE",
+}
+
+
+# ---------------------------------------------------------------------------
+# Dialog de sélection des marques pour l'export Excel
+# ---------------------------------------------------------------------------
+
+class ExcelExportDialog(QDialog):
+    """
+    Dialog permettant de choisir quelle(s) marque(s) exporter en Excel.
+
+    Génère un fichier .xlsx distinct par marque sélectionnée.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Exporter en Excel")
+        self.setFixedWidth(380)
+        self.setModal(True)
+        self.setStyleSheet("QDialog { background: #F8FAFC; }")
+
+        self._checkboxes: dict[str, QCheckBox] = {}
+        self._available_brands: list[str] = []
+        self._setup_ui()
+        self._load_brands()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        # Titre
+        title = QLabel("Sélectionner les marques à exporter")
+        title_font = QFont()
+        title_font.setPointSize(11)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setStyleSheet("color: #1E293B;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Un fichier Excel distinct sera créé par marque.")
+        subtitle.setStyleSheet("color: #64748B; font-size: 9pt;")
+        layout.addWidget(subtitle)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #E2E8F0;")
+        layout.addWidget(sep)
+
+        # Checkbox "Toutes les marques"
+        self._cb_all = QCheckBox("Toutes les marques")
+        self._cb_all.setStyleSheet(
+            "QCheckBox { font-weight: bold; color: #1E293B; font-size: 10pt; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+        )
+        self._cb_all.stateChanged.connect(self._on_all_toggled)
+        layout.addWidget(self._cb_all)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet("color: #E2E8F0;")
+        layout.addWidget(sep2)
+
+        # Zone scrollable pour les marques individuelles
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFixedHeight(200)
+
+        self._brands_container = QWidget()
+        self._brands_layout = QVBoxLayout(self._brands_container)
+        self._brands_layout.setContentsMargins(4, 4, 4, 4)
+        self._brands_layout.setSpacing(6)
+        self._brands_layout.addStretch()
+        scroll.setWidget(self._brands_container)
+        layout.addWidget(scroll)
+
+        # Note info
+        self._info_label = QLabel("")
+        self._info_label.setStyleSheet(
+            "color: #475569; font-size: 8pt; "
+            "background: #F1F5F9; border-radius: 4px; padding: 6px 10px;"
+        )
+        self._info_label.setWordWrap(True)
+        layout.addWidget(self._info_label)
+
+        # Boutons
+        btn_box = QDialogButtonBox()
+        self._btn_export = QPushButton("📊  Exporter")
+        self._btn_export.setEnabled(False)
+        self._btn_export.setStyleSheet(
+            "QPushButton { background: #7C3AED; color: white; border-radius: 6px; "
+            "font-weight: bold; padding: 6px 20px; }"
+            "QPushButton:hover { background: #6D28D9; }"
+            "QPushButton:disabled { background: #CBD5E1; color: #94A3B8; }"
+        )
+        btn_cancel = QPushButton("Annuler")
+        btn_cancel.setStyleSheet(
+            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 6px 16px; }"
+            "QPushButton:hover { background: #F1F5F9; }"
+        )
+        btn_box.addButton(btn_cancel, QDialogButtonBox.RejectRole)
+        btn_box.addButton(self._btn_export, QDialogButtonBox.AcceptRole)
+        btn_cancel.clicked.connect(self.reject)
+        self._btn_export.clicked.connect(self.accept)
+        layout.addWidget(btn_box)
+
+    def _load_brands(self) -> None:
+        """Charge la liste des marques depuis le registre de connecteurs."""
+        try:
+            from app.connectors.registry import ConnectorRegistry
+            self._available_brands = ConnectorRegistry().list_connectors()
+        except Exception:
+            self._available_brands = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
+
+        # Vider l'ancien contenu (hors stretch)
+        while self._brands_layout.count() > 1:
+            item = self._brands_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for slug in self._available_brands:
+            color = _BRAND_COLORS.get(slug, "#2C3E50")
+            cb = QCheckBox(slug.upper())
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {color}; font-weight: bold; font-size: 10pt; }}"
+                "QCheckBox::indicator { width: 15px; height: 15px; }"
+            )
+            cb.stateChanged.connect(self._on_brand_toggled)
+            self._brands_layout.insertWidget(self._brands_layout.count() - 1, cb)
+            self._checkboxes[slug] = cb
+
+        self._update_info()
+
+    def _on_all_toggled(self, state: int) -> None:
+        checked = state == Qt.Checked
+        for cb in self._checkboxes.values():
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+        self._update_export_button()
+        self._update_info()
+
+    def _on_brand_toggled(self) -> None:
+        selected = self.get_selected_brands()
+        all_checked = len(selected) == len(self._available_brands)
+        self._cb_all.blockSignals(True)
+        self._cb_all.setChecked(all_checked)
+        self._cb_all.blockSignals(False)
+        self._update_export_button()
+        self._update_info()
+
+    def _update_export_button(self) -> None:
+        self._btn_export.setEnabled(len(self.get_selected_brands()) > 0)
+
+    def _update_info(self) -> None:
+        selected = self.get_selected_brands()
+        n = len(selected)
+        if n == 0:
+            self._info_label.setText("Sélectionnez au moins une marque.")
+        elif n == 1:
+            self._info_label.setText(f"1 fichier Excel sera créé : export_…_{selected[0]}.xlsx")
+        else:
+            self._info_label.setText(
+                f"{n} fichiers Excel seront créés, un par marque :\n"
+                + ", ".join(f"export_…_{s}.xlsx" for s in selected)
+            )
+
+    def get_selected_brands(self) -> list[str]:
+        return [slug for slug, cb in self._checkboxes.items() if cb.isChecked()]
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +526,18 @@ class MainWindow(QMainWindow):
         self._btn_export.clicked.connect(self._on_export_csv_clicked)
         layout.addWidget(self._btn_export)
 
+        # Bouton export Excel — ouvre le dialog de sélection de marque
+        self._btn_excel = QPushButton("📊  Excel")
+        self._btn_excel.setMinimumHeight(34)
+        self._btn_excel.setToolTip("Exporter en Excel — choisir la/les marque(s)")
+        self._btn_excel.setStyleSheet(
+            "QPushButton { background: #7C3AED; color: white; border-radius: 6px; "
+            "font-weight: bold; padding: 0 12px; font-size: 9pt; }"
+            "QPushButton:hover { background: #6D28D9; }"
+        )
+        self._btn_excel.clicked.connect(self._on_export_excel_clicked)
+        layout.addWidget(self._btn_excel)
+
         return topbar
 
     def _build_progress_bar(self) -> QWidget:
@@ -371,7 +568,6 @@ class MainWindow(QMainWindow):
 
     def _load_views(self) -> None:
         """Instancie et empile toutes les vues."""
-        # Lazy import pour éviter les imports circulaires
         from app.ui.views.dashboard import DashboardView
         from app.ui.views.brands    import BrandsView
         from app.ui.views.results   import ResultsView
@@ -419,11 +615,9 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(idx)
         self._view_title.setText(view_name)
 
-        # Mettre à jour les boutons de nav
         for i, btn in enumerate(self._nav_buttons):
             btn.setChecked(i == idx)
 
-        # Rafraîchir la vue si elle a une méthode refresh()
         self._refresh_current_view()
 
     def _refresh_current_view(self) -> None:
@@ -442,12 +636,6 @@ class MainWindow(QMainWindow):
     def _setup_event_bus(self) -> None:
         """Abonne la fenêtre aux événements du bus."""
         event_bus.start()
-        # NOTE : on ne s'abonne PAS à "log.message" ici.
-        # Les logs passent par le logger Python → fichier + console.
-        # L'ancien main_window (Phase 1) avait une zone de logs inline ;
-        # la Phase 2 n'en a pas : les logs sont visibles dans le terminal
-        # ou le fichier de log rotatif. S'abonner ici créerait une boucle :
-        #   log.info() → bus "log.message" → _on_log_event → _append_log → log.info() → ...
         event_bus.subscribe("crawl.task.progress",     self._on_progress_event)
         event_bus.subscribe("product.saved",            self._on_product_saved)
         event_bus.subscribe("crawl.session.completed",  self._on_session_completed)
@@ -476,22 +664,19 @@ class MainWindow(QMainWindow):
         self._btn_run.setEnabled(False)
         self._btn_cancel.setEnabled(True)
 
-        # Afficher la barre de progression
         self._progress_widget.setFixedHeight(30)
-        self._progress_bar.setRange(0, 0)   # Mode indéterminé
+        self._progress_bar.setRange(0, 0)
         self._progress_bar.setValue(0)
         self._progress_label.setText(f"Initialisation — {', '.join(brand_slugs)}")
         self._session_status_label.setText("⏳ Session en cours…")
         self._status_bar.showMessage(f"Session en cours : {', '.join(brand_slugs)}")
 
-        # Mettre à jour le dashboard
         if hasattr(self, "_dashboard_view"):
             self._dashboard_view.set_running(True)
 
         self._append_log("INFO", f"=== Démarrage session — {', '.join(brand_slugs)} ===")
         self._append_log("INFO", f"Heure : {datetime.now().strftime('%H:%M:%S')}")
 
-        # Lancer dans un QThread
         self._worker = CrawlWorker(brand_slugs=brand_slugs)
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
@@ -518,15 +703,39 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erreur export", str(exc))
 
     def _on_export_excel_clicked(self) -> None:
+        """
+        Ouvre le dialog de sélection de marque, puis exporte
+        un fichier Excel distinct pour chaque marque choisie.
+        """
+        dialog = ExcelExportDialog(parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected = dialog.get_selected_brands()
+        if not selected:
+            return
+
         try:
             from app.exports.excel_exporter import ExcelExporter
             exporter = ExcelExporter()
-            path = exporter.export_from_db()
-            self._append_log("INFO", f"Excel créé : {path}")
-            QMessageBox.information(self, "Export réussi", f"Excel créé :\n{path}")
+            created_paths: list[Path] = []
+
+            for slug in selected:
+                path = exporter.export_brand(slug)
+                created_paths.append(path)
+                self._append_log("INFO", f"Excel créé : {path.name}")
+
+            if len(created_paths) == 1:
+                msg = f"Fichier créé :\n{created_paths[0]}"
+            else:
+                names = "\n".join(p.name for p in created_paths)
+                msg = f"{len(created_paths)} fichiers créés dans :\n{created_paths[0].parent}\n\n{names}"
+
+            QMessageBox.information(self, "Export Excel réussi", msg)
+
         except Exception as exc:
             self._append_log("ERROR", f"Erreur export Excel : {exc}")
-            QMessageBox.critical(self, "Erreur export", str(exc))
+            QMessageBox.critical(self, "Erreur export Excel", str(exc))
 
     # -------------------------------------------------------------------
     # Handlers de fin de session
@@ -551,7 +760,6 @@ class MainWindow(QMainWindow):
         self._append_log("INFO", f"=== Session terminée : {summary} ===")
         self._progress_label.setText("Session terminée")
 
-        # Masquer la barre de progression après 3s
         QTimer.singleShot(3000, lambda: self._progress_widget.setFixedHeight(0))
 
         if hasattr(self, "_dashboard_view"):
@@ -562,7 +770,6 @@ class MainWindow(QMainWindow):
             self._thread.quit()
             self._thread.wait()
 
-        # Proposer un rapport
         self._offer_report(results)
 
     def _on_crawl_error(self, error_msg: str) -> None:
@@ -627,9 +834,7 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_session_completed(self, **kwargs) -> None:
-        # Rafraîchir le dashboard et l'historique
         if hasattr(self, "_history_view"):
-            # Rafraîchissement différé (la DB est peut-être encore en cours d'écriture)
             QTimer.singleShot(500, self._history_view.refresh)
 
     # -------------------------------------------------------------------
@@ -637,16 +842,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _append_log(self, level: str, message: str) -> None:
-        """
-        Reçoit un message de log à afficher dans l'UI.
-
-        IMPORTANT : ne jamais appeler log.info/warning/error ici.
-        Le logger écrit sur le bus d'événements, qui rappelle _on_log_event,
-        qui émet _log_received, qui rappelle _append_log → boucle infinie.
-        Cette méthode est le point terminal de la chaîne : elle ne fait rien
-        de plus (les vues abonnées au bus affichent les logs elles-mêmes).
-        """
         # Point terminal — pas de re-log ici.
+        pass
 
     def _update_progress(self, label: str, current: int, total: int) -> None:
         """Met à jour la barre de progression."""
@@ -678,7 +875,6 @@ class MainWindow(QMainWindow):
             if self._worker:
                 self._worker.cancel()
 
-        # Arrêter le planificateur
         if self._scheduler:
             try:
                 self._scheduler.stop()

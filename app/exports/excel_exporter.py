@@ -10,6 +10,10 @@ Ordre de tri :
 Interface identique à CsvExporter et JsonExporter :
   exporter = ExcelExporter()
   path = exporter.export_from_db(brand_slugs=["spanx"], session_id=42)
+
+Export par marque :
+  path = exporter.export_brand("spanx")   → un fichier par marque
+  paths = exporter.export_all_brands()    → un fichier par marque connectée
 """
 from __future__ import annotations
 
@@ -110,6 +114,10 @@ class ExcelExporter:
     Interface identique à CsvExporter :
         exporter = ExcelExporter()
         path = exporter.export_from_db(brand_slugs=["spanx"])
+
+    Export par marque :
+        path  = exporter.export_brand("spanx")
+        paths = exporter.export_all_brands()
     """
 
     def __init__(self, export_dir: Path | None = None) -> None:
@@ -138,6 +146,52 @@ class ExcelExporter:
         """
         rows = self._load_rows(brand_slugs)
         return self._write_excel(rows, session_id=session_id, filename=filename)
+
+    def export_brand(
+        self,
+        brand_slug: str,
+        session_id: int | None = None,
+    ) -> Path:
+        """
+        Exporte les données d'une seule marque dans un fichier Excel dédié.
+
+        Le nom du fichier est automatiquement suffixé du slug de la marque,
+        ex: export_20260703_120000_spanx.xlsx
+
+        Args:
+            brand_slug : slug de la marque à exporter (ex: "spanx").
+            session_id : suffixe optionnel du nom de fichier.
+
+        Returns:
+            Chemin du fichier .xlsx créé.
+        """
+        rows = self._load_rows([brand_slug])
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        sfx  = f"_session{session_id}" if session_id else ""
+        filename = f"export_{ts}{sfx}_{brand_slug}.xlsx"
+        return self._write_excel(rows, session_id=session_id, filename=filename)
+
+    def export_all_brands(
+        self,
+        session_id: int | None = None,
+    ) -> list[Path]:
+        """
+        Exporte chaque marque dans un fichier Excel distinct.
+
+        Returns:
+            Liste des chemins créés, un par marque active.
+        """
+        from app.storage.database import get_db
+        from app.storage.repository import BrandRepository
+
+        with get_db() as db:
+            brands = BrandRepository(db).list_active()
+
+        paths: list[Path] = []
+        for brand in brands:
+            path = self.export_brand(brand.slug, session_id=session_id)
+            paths.append(path)
+        return paths
 
     # ── Chargement depuis la DB ───────────────────────────────────────────
 
