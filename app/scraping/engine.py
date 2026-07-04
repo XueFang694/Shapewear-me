@@ -330,7 +330,25 @@ class ScrapingEngine:
             return None
 
     def _fetch_product(self, url: str) -> RawProduct | None:
-        """Récupère et parse un produit depuis son URL."""
+        """
+        Récupère et parse un produit depuis son URL.
+
+        Si l'URL n'utilise pas le schéma http(s), on considère qu'il s'agit
+        d'une URL virtuelle (ex: shapermint://product/<slug>) définie par le
+        connecteur pour court-circuiter le fetch HTTP. Dans ce cas on délègue
+        directement à parse_product() avec l'URL comme données, laissant le
+        connecteur récupérer les données depuis son cache interne.
+        """
+        # ── URL virtuelle (schéma non-HTTP) → délégation directe ─────────
+        if not url.startswith("http://") and not url.startswith("https://"):
+            log.debug(
+                "URL virtuelle détectée — délégation directe au connecteur",
+                brand=self._meta.slug,
+                url=url,
+            )
+            return self._connector.parse_product(url, url)
+
+        # ── URL HTTP standard ────────────────────────────────────────────
         from app.scraping.http_client import HttpClient
 
         engine = self._connector.config.get("engine", "html")
@@ -345,7 +363,11 @@ class ScrapingEngine:
             if response.status_code != 200:
                 return None
             data = response.json()
-            Path("data/shopify/shopify_{}.json".format(url.split("/")[-1])).write_text(
+            _shopify_cache_dir = Path("data/shopify")
+            _shopify_cache_dir.mkdir(parents=True, exist_ok=True)
+            _shopify_cache_dir.joinpath(
+                "shopify_{}.json".format(url.split("/")[-1])
+            ).write_text(
                 json.dumps(data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
