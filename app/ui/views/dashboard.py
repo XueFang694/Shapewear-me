@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush, QFont
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -38,8 +38,44 @@ _BRAND_COLORS = {
     "skims":      "#C8A882",
     "honeylove":  "#C0392B",
     "shapermint": "#27AE60",
-    "wacoal": "#3727AE",
+    "wacoal":     "#3727AE",
 }
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    """Convertit une couleur hex en tuple (r, g, b)."""
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _relative_luminance(r: int, g: int, b: int) -> float:
+    """Calcule la luminance relative (WCAG 2.1)."""
+    def linearize(c: int) -> float:
+        s = c / 255.0
+        return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
+    return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
+
+
+def _contrast_ratio(lum1: float, lum2: float) -> float:
+    lighter = max(lum1, lum2)
+    darker  = min(lum1, lum2)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _readable_text_color(bg_hex: str) -> str:
+    """
+    Retourne '#FFFFFF' ou '#1E293B' selon lequel offre le meilleur
+    contraste WCAG sur le fond donné.
+    """
+    r, g, b = _hex_to_rgb(bg_hex)
+    bg_lum   = _relative_luminance(r, g, b)
+    white_lum  = 1.0
+    dark_lum   = _relative_luminance(30, 41, 59)   # #1E293B
+
+    contrast_white = _contrast_ratio(bg_lum, white_lum)
+    contrast_dark  = _contrast_ratio(bg_lum, dark_lum)
+
+    return "#FFFFFF" if contrast_white >= contrast_dark else "#1E293B"
 
 
 class KpiCard(QFrame):
@@ -49,8 +85,8 @@ class KpiCard(QFrame):
         super().__init__()
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet(
-            f"QFrame {{ background: white; border-radius: 8px; "
-            f"border: 1px solid #E2E8F0; }}"
+            "QFrame { background: white; border-radius: 8px; "
+            "border: 1px solid #E2E8F0; }"
         )
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(100)
@@ -78,9 +114,9 @@ class KpiCard(QFrame):
 class DashboardView(QWidget):
     """Vue d'accueil avec KPIs et résumé de session."""
 
-    # Signal émis quand l'utilisateur clique "Lancer"
-    run_requested = Signal()
-    export_csv_requested = Signal()
+    from PySide6.QtCore import Signal
+    run_requested          = Signal()
+    export_csv_requested   = Signal()
     export_excel_requested = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -234,8 +270,8 @@ class DashboardView(QWidget):
             )
 
             # Événements de la dernière session
-            new_evts   = []
-            price_evts = []
+            new_evts   = 0
+            price_evts = 0
             if last_session:
                 new_evts = db.query(ChangeEvent).filter_by(
                     session_id=last_session.id, event_type="product.new"
@@ -266,24 +302,42 @@ class DashboardView(QWidget):
             active_c = len([p for p in bps if p.is_active])
             bs_c     = len([p for p in bps if p.is_best_seller])
             promo_c  = len([p for p in bps if snapshots.get(p.id) and snapshots[p.id].on_sale])
-            color    = _BRAND_COLORS.get(brand.slug, "#2C3E50")
+            bg_color = _BRAND_COLORS.get(brand.slug, "#2C3E50")
+            fg_color = _readable_text_color(bg_color)
 
+            # Colonne Marque : fond coloré + texte contrasté
             name_item = QTableWidgetItem(brand.name)
-            name_item.setForeground(Qt.GlobalColor.white)  # texte blanc
-            # Fond coloré simulé via stylesheet sur l'item
+            name_item.setBackground(QBrush(QColor(bg_color)))
+            name_item.setForeground(QBrush(QColor(fg_color)))
+            font = QFont()
+            font.setBold(True)
+            name_item.setFont(font)
             self._brands_table.setItem(row, 0, name_item)
-            self._brands_table.setItem(row, 1, QTableWidgetItem(str(active_c)))
-            self._brands_table.setItem(row, 2, QTableWidgetItem(str(bs_c)))
-            self._brands_table.setItem(row, 3, QTableWidgetItem(str(promo_c)))
+
+            # Colonnes numériques : texte sombre standard
+            for col, value in enumerate([
+                str(active_c),
+                str(bs_c),
+                str(promo_c),
+            ], start=1):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                self._brands_table.setItem(row, col, item)
 
             # Dernière session
-            last_s = last_session
-            if last_s and last_s.started_at:
-                date_str = last_s.started_at.strftime("%d/%m/%Y %H:%M")
+            if last_session and last_session.started_at:
+                date_str = last_session.started_at.strftime("%d/%m/%Y %H:%M")
             else:
                 date_str = "—"
-            self._brands_table.setItem(row, 4, QTableWidgetItem(date_str))
-            self._brands_table.setItem(row, 5, QTableWidgetItem("Actif ✓"))
+            date_item = QTableWidgetItem(date_str)
+            date_item.setTextAlignment(Qt.AlignCenter)
+            self._brands_table.setItem(row, 4, date_item)
+
+            # Statut
+            status_item = QTableWidgetItem("Actif ✓")
+            status_item.setForeground(QBrush(QColor("#16A34A")))
+            status_item.setTextAlignment(Qt.AlignCenter)
+            self._brands_table.setItem(row, 5, status_item)
 
         self._brands_table.resizeColumnsToContents()
 
