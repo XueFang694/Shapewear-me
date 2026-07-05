@@ -1,44 +1,48 @@
-"""Connecteur Shapermint v4.0 — parsing complet depuis __NEXT_DATA__ des pages produit.
+"""Connecteur Shapermint v5.0 — parsing complet depuis __NEXT_DATA__ des pages produit.
 
-CHANGEMENTS v4.0 (correctifs sur base v3.0)
+CHANGEMENTS v5.0 (correctifs sur base v4.0)
 ────────────────────────────────────────────
-Problèmes identifiés dans v3.0 et corrigés ici :
 
-1. DISPONIBILITÉ
-   Règle correcte : inventory_quantity > 0 OR continue_selling_when_oos = True.
-   Ce champ est présent et fiable dans __NEXT_DATA__ — pas besoin de heuristiques HTML.
-   L'accessibilité de la page n'implique PAS que des variantes sont disponibles.
+1. FIX CRITIQUE — ENGINE HTML
+   Le moteur est désormais "html" dans la config (était "shopify_json").
+   ScrapingEngine passait response.json() ce qui causait l'erreur
+   "Expecting value: line 1 column 1 (char 0)" car les pages Shapermint
+   retournent du HTML, pas du JSON.
+   Avec engine=html, ScrapingEngine passe response.text (HTML) à parse_product.
 
-2. VARIANTS GRANULAIRES (1 ligne par couleur × taille)
-   v3.0 construisait bien detailed_variants mais les tailles/couleurs listées
-   globalement pouvaient diverger. Désormais toutes les données (couleur, taille,
-   prix, dispo) viennent directement de product_variations[], et la liste de
-   couleurs uniques et de tailles uniques est reconstruite depuis ces variantes.
+2. FIX DISPONIBILITÉ
+   La disponibilité d'une variante est fiable dans __NEXT_DATA__ :
+     available = inventory_quantity > 0 OR continue_selling_when_oos = True
+   On ne se base PLUS sur l'accessibilité de la page produit.
+   Un produit totalement épuisé (toutes variantes qty=0 et cont=False)
+   retourne availability="out_of_stock".
 
-3. MATÉRIAUX
-   Champ product.composition → texte brut.
-   Champ product.material.composition → même donnée (fallback).
-   Champ product.compression → niveau de compression (normalisé via _COMPRESSION_MAP).
-   Ces champs sont bien présents dans __NEXT_DATA__ — zéro besoin du HTML accordion.
+3. FIX VARIANTS GRANULAIRES (1 ligne par couleur × taille)
+   Toutes les données viennent directement de product_variations[].
+   La liste de couleurs et de tailles uniques est construite depuis ces variantes
+   + la dimensions list (variatons_summary.product_dimensions) pour l'ordre.
 
-4. COULEURS ET TAILLES
-   Les dimensions sont disponibles dans :
-     variations_definition.variatons_summary.product_dimensions[]
-   Cela donne les listes ordonnées de valeurs Color et Size.
-   En complément, les variantes individuelles donnent la dispo par combinaison.
+4. FIX COULEURS ET TAILLES
+   Extraites depuis variatons_summary.product_dimensions (order stable).
+   Fallback sur les variation_attributes de chaque variante.
 
-5. REVIEWS AVEC PAGINATION
-   ssrReviews.reviews   → premiers avis (list OU dict selon le produit).
-   ssrReviews.metadata  → {total_reviews, total_pages, page_number, page_size}.
-   API paginée          → https://api.shapermint.com/reviews
-                          ?product_uuid=<uuid>&page=N&without_images=true
-   Le nombre de pages à fetcher est limité par max_review_pages (config.yml).
-   Chaque review est normalisée avec les champs : id, rating, title, author,
-   body, date_created, has_image, variant_name.
+5. FIX MATÉRIAUX
+   product.composition → texte brut complet.
+   product.material.composition → idem (fallback).
+   product.compression → niveau de compression normalisé.
+
+6. FIX AVIS CLIENTS
+   ssrReviews.reviews est une LISTE (pas un dict).
+   Ces 4 avis SSR (avec images) sont récupérés directement.
+   API paginée pour les avis texte (sans images) :
+     GET https://api.shapermint.com/reviews
+         ?product_uuid=<uuid>&page=N&page_size=20&without_images=true
+   Nombre de pages = ceil(total_reviews / 20), limité par max_review_pages.
 """
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -83,7 +87,7 @@ _SUBCAT_TO_CATEGORY: dict[str, str] = {
 
 _SALE_TAGS = frozenset({"SALE", "product-label-sale"})
 
-# Mapping niveaux de compression Shapermint → valeur normalisée (labels classifieur)
+# Mapping niveaux de compression Shapermint → labels du classifieur
 _COMPRESSION_MAP: dict[str, str] = {
     "LOW":        "Légère",
     "LIGHT":      "Légère",
@@ -96,19 +100,20 @@ _COMPRESSION_MAP: dict[str, str] = {
     "MAXIMUM":    "Extra-forte",
 }
 
-# URL de l'API reviews Shapermint (texte, sans images)
 _REVIEWS_API_URL = "https://api.shapermint.com/reviews"
 
 
 class ShapermintConnector(BaseConnector):
     """
-    Connecteur Shapermint v4.0.
+    Connecteur Shapermint v5.0.
 
-    Stratégie d'extraction :
-      • get_product_urls() : pagine les collections via __NEXT_DATA__ HTML
-        et retourne les URLs HTML des pages produit.
-      • parse_product()    : extrait tout depuis __NEXT_DATA__ de la page produit
-        → variantes, disponibilité, matériaux, couleurs, tailles, avis.
+    Stratégie :
+      • get_product_urls() : pagine les collections via __NEXT_DATA__ HTML.
+      • parse_product(url, html_str) : extrait tout depuis __NEXT_DATA__
+        de la page produit HTML.
+
+    Engine configuré à "html" → ScrapingEngine passe response.text
+    directement à parse_product().
     """
 
     def __init__(self, config_path: Path | None = None):
@@ -120,8 +125,8 @@ class ShapermintConnector(BaseConnector):
         return ConnectorMeta(
             name="Shapermint",
             slug="shapermint",
-            version="4.0",
-            engine="shopify_json",
+            version="5.0",
+            engine="html",
             base_url=self.base_url,
         )
 
@@ -213,7 +218,7 @@ class ShapermintConnector(BaseConnector):
     def parse_product(self, url: str, data: str | dict) -> RawProduct:
         """
         Parse une page produit Shapermint.
-          - data = str  → extrait __NEXT_DATA__ (chemin normal ScrapingEngine HTML)
+          - data = str  → HTML contenant __NEXT_DATA__ (chemin normal)
           - data = dict → compatibilité tests (dict Shopify standard)
         """
         if isinstance(data, str):
@@ -232,7 +237,7 @@ class ShapermintConnector(BaseConnector):
         m = _NEXT_DATA_RE.search(html)
         if not m:
             raise ConnectorParseError(
-                "Shapermint __NEXT_DATA__ introuvable sur la page produit",
+                "Shapermint __NEXT_DATA__ introuvable",
                 context={"url": url},
             )
         try:
@@ -262,11 +267,11 @@ class ShapermintConnector(BaseConnector):
         product: dict,
         ssr_reviews: dict,
     ) -> RawProduct:
-        """Construit le RawProduct depuis le dict produit extrait de __NEXT_DATA__."""
+        """Construit le RawProduct depuis le dict produit __NEXT_DATA__."""
         slug = product.get("slug", "")
         tags: list[str] = product.get("tags", []) or []
 
-        # ── external_id : ID Shopify numérique ────────────────────────────
+        # external_id : ID Shopify numérique
         external_id = str(product.get("id", slug) or slug)
 
         # ── Variantes, prix, couleurs, tailles ────────────────────────────
@@ -275,17 +280,15 @@ class ShapermintConnector(BaseConnector):
 
         detailed_variants, sizes, colors = self._extract_variants(pvs, vd)
 
-        # ── Prix (première variante disponible, sinon première) ───────────
+        # ── Prix (première variante dispo, sinon première) ─────────────────
         price:      float | None = None
         compare_at: float | None = None
         on_sale = False
 
         if pvs:
-            # Préférer une variante disponible pour afficher le bon prix
             ref_v = next((v for v in pvs if self._is_available(v)), pvs[0])
             price      = normalize_price(ref_v.get("price"))
             compare_at = normalize_price(ref_v.get("compare_at_price"))
-            # Fallback sur prices.US si les champs plats sont absents
             if price is None:
                 price = normalize_price(
                     (ref_v.get("prices") or {}).get("US", {}).get("price")
@@ -302,12 +305,11 @@ class ShapermintConnector(BaseConnector):
             if compare_at and price and compare_at > price:
                 on_sale = True
 
-        # Tags de soldes
         if not on_sale and any(t in _SALE_TAGS for t in tags):
             on_sale = True
 
         # ── Disponibilité produit ─────────────────────────────────────────
-        # Au moins une variante disponible = produit en stock
+        # Fiable car inventory_quantity et continue_selling_when_oos sont présents
         if pvs:
             availability = (
                 "in_stock"
@@ -317,7 +319,7 @@ class ShapermintConnector(BaseConnector):
         else:
             availability = "unknown"
 
-        # ── Matériaux (depuis product.composition / product.material) ─────
+        # ── Matériaux ─────────────────────────────────────────────────────
         materials = self._extract_materials(product)
 
         # ── Niveau de compression ─────────────────────────────────────────
@@ -397,16 +399,14 @@ class ShapermintConnector(BaseConnector):
         vd: dict,
     ) -> tuple[list[dict], list[str], list[dict]]:
         """
-        Construit les variantes détaillées, et les listes ordonnées de
-        tailles et couleurs depuis variations_definition.
+        Construit les variantes détaillées et les listes ordonnées de
+        tailles et couleurs.
 
-        Couleurs et tailles ordonnées : extraites depuis variatons_summary
-        (typo intentionnelle côté Shapermint) pour respecter l'ordre d'affichage.
-        La disponibilité par variante provient de product_variations[].
-
-        Règle de disponibilité : inventory_quantity > 0 OR continue_selling_when_oos.
+        Ordre des couleurs et tailles : depuis variatons_summary.product_dimensions
+        pour respecter l'ordre d'affichage sur le site.
+        Disponibilité par variante : inventory_quantity > 0 OU continue_selling_when_oos.
         """
-        # ── Listes ordonnées depuis variatons_summary ─────────────────────
+        # Listes ordonnées depuis variatons_summary
         vs   = vd.get("variatons_summary") or {}
         dims = vs.get("product_dimensions") or []
 
@@ -414,20 +414,18 @@ class ShapermintConnector(BaseConnector):
         ordered_sizes:  list[str] = []
         for dim in dims:
             name = (dim.get("name") or dim.get("display_name") or "").lower()
-            values = dim.get("values") or []
+            values = [v for v in (dim.get("values") or []) if v]
             if "color" in name or "colour" in name:
-                ordered_colors = [v for v in values if v]
+                ordered_colors = values
             elif "size" in name:
-                ordered_sizes = [v for v in values if v]
+                ordered_sizes = values
 
-        # ── Index disponibilité par (color, size) depuis product_variations ──
-        # Plusieurs variantes peuvent partager couleur+taille (ex: packs),
-        # on considère disponible si AU MOINS une est dispo.
-        avail_map:  dict[tuple[str, str], bool]  = {}
-        price_map:  dict[tuple[str, str], float | None] = {}
-        comp_map:   dict[tuple[str, str], float | None] = {}
-        sku_map:    dict[tuple[str, str], str]   = {}
-        onsale_map: dict[tuple[str, str], bool]  = {}
+        # Index disponibilité par (color, size) depuis product_variations
+        avail_map:  dict[tuple, bool]        = {}
+        price_map:  dict[tuple, float|None]  = {}
+        comp_map:   dict[tuple, float|None]  = {}
+        sku_map:    dict[tuple, str]         = {}
+        onsale_map: dict[tuple, bool]        = {}
 
         detailed: list[dict] = []
 
@@ -445,10 +443,9 @@ class ShapermintConnector(BaseConnector):
             size  = attrs.get("Size") or attrs.get("size") or ""
             key   = (color, size)
 
-            # Prix plat ou via prices.US
-            price_raw    = v.get("price")
-            compare_raw  = v.get("compare_at_price")
-            prices_us    = (v.get("prices") or {}).get("US") or {}
+            price_raw   = v.get("price")
+            compare_raw = v.get("compare_at_price")
+            prices_us   = (v.get("prices") or {}).get("US") or {}
             if price_raw is None:
                 price_raw   = prices_us.get("price")
             if compare_raw is None:
@@ -459,7 +456,6 @@ class ShapermintConnector(BaseConnector):
             on_sale    = bool(compare_at and price and compare_at > price)
             available  = self._is_available(v)
 
-            # Agréger la disponibilité : True dès qu'une variante est dispo
             avail_map[key]  = avail_map.get(key, False) or available
             price_map[key]  = price_map.get(key) or price
             comp_map[key]   = comp_map.get(key) or compare_at
@@ -479,8 +475,7 @@ class ShapermintConnector(BaseConnector):
                 "continue_selling":   v.get("continue_selling_when_oos", False),
             })
 
-        # ── Construire la liste de couleurs avec dispo agrégée ────────────
-        # Si variatons_summary n'a pas les couleurs, les reconstruire depuis pvs
+        # Si variatons_summary n'a pas les couleurs → reconstruire depuis pvs
         if not ordered_colors:
             seen: set[str] = set()
             for v in pvs:
@@ -499,15 +494,14 @@ class ShapermintConnector(BaseConnector):
                     ordered_sizes.append(s)
                     seen_s.add(s)
 
-        # Couleurs avec disponibilité : dispo si au moins 1 taille disponible
+        # Couleurs avec disponibilité agrégée
         colors_list: list[dict] = []
         for color in ordered_colors:
-            color_available = any(
-                avail_map.get((color, size), False) for size in ordered_sizes
-            ) if ordered_sizes else any(
-                v for k, v in avail_map.items() if k[0] == color
+            color_available = (
+                any(avail_map.get((color, s), False) for s in ordered_sizes)
+                if ordered_sizes
+                else any(v for k, v in avail_map.items() if k[0] == color)
             )
-            # Trouver un SKU représentatif pour cette couleur
             ref_sku = next(
                 (sku_map.get((color, s), "") for s in ordered_sizes if (color, s) in sku_map),
                 "",
@@ -524,18 +518,13 @@ class ShapermintConnector(BaseConnector):
     def _is_available(v: dict) -> bool:
         """
         Disponibilité d'une variante Shapermint.
-
-        Règle : inventory_quantity > 0  OU  continue_selling_when_oos = True.
-        Le champ disabled n'entre pas en compte (un produit disabled reste
-        visible dans __NEXT_DATA__ mais n'est plus vendable — on le considère
-        hors stock par prudence si disabled=True ET qty=0).
+        Règle : inventory_quantity > 0 OU continue_selling_when_oos = True.
+        Si disabled=True et qty<=0 et cont=False → hors stock.
         """
-        iq   = v.get("inventory_quantity") or 0
-        cont = bool(v.get("continue_selling_when_oos", False))
+        cont     = bool(v.get("continue_selling_when_oos", False))
         disabled = bool(v.get("disabled", False))
-
         try:
-            qty = int(iq)
+            qty = int(v.get("inventory_quantity") or 0)
         except (ValueError, TypeError):
             qty = 0
 
@@ -547,17 +536,12 @@ class ShapermintConnector(BaseConnector):
 
     def _extract_materials(self, product: dict) -> dict:
         """
-        Extrait la composition textile depuis __NEXT_DATA__ :
-          - product.composition           → texte brut de composition
-          - product.material.composition  → idem (fallback)
-          - product.compression           → niveau de compression brut
-
-        Retourne un dict compatible Normalizer :
-          {material_main, material_raw, material_composition_json}
+        Extrait la composition textile depuis __NEXT_DATA__.
+        Sources : product.composition, product.material.composition.
         """
         result: dict = {}
 
-        mat_dict       = product.get("material") or {}
+        mat_dict        = product.get("material") or {}
         composition_str = (
             product.get("composition")
             or (mat_dict.get("composition") if isinstance(mat_dict, dict) else None)
@@ -570,7 +554,6 @@ class ShapermintConnector(BaseConnector):
         result["material_main"] = composition_str
         result["material_raw"]  = composition_str
 
-        # Extraire les pourcentages fibre par fibre
         from app.scraping.shopify_utils import _FIBER_PATTERNS
         comp: dict[str, float] = {}
         text_lower = composition_str.lower()
@@ -593,27 +576,20 @@ class ShapermintConnector(BaseConnector):
         """
         Collecte les avis depuis deux sources :
 
-        1. ssrReviews.reviews (SSR, avis avec images, ~2-5 avis)
-           Note : peut être une list OU un dict selon le produit.
-           On normalise toujours en liste.
+        1. ssrReviews.reviews : liste des avis SSR (avec images), ~2-4 avis.
+           Peut être une liste OU un dict selon la version de la page.
 
-        2. API Shapermint paginée (texte, sans images) :
+        2. API Shapermint (texte, sans images) :
            GET https://api.shapermint.com/reviews
-               ?product_uuid=<uuid>&page=N&without_images=true
-           Pages disponibles : ssrReviews.metadata.total_pages.
-           Limité par max_review_pages (config.yml, défaut 3).
-
-        Retourne une liste de dicts normalisés :
-          {id, rating, title, author, body, date_created, has_image, variant_name}
+               ?product_uuid=<uuid>&page=N&page_size=20&without_images=true
+           Nb de pages = ceil(total_reviews / 20), limité par max_review_pages.
         """
         max_review_pages = int(self._config.get("max_review_pages", 3))
 
-        # ── 1. Avis SSR ───────────────────────────────────────────────────
+        # 1. Avis SSR (liste ou dict)
         reviews_raw = ssr_reviews.get("reviews") or []
-
-        # ssrReviews.reviews peut être une list ou un dict (clés = review_id)
         if isinstance(reviews_raw, dict):
-            reviews_list_raw = list(reviews_raw.values())
+            reviews_list_raw: list = list(reviews_raw.values())
         else:
             reviews_list_raw = list(reviews_raw)
 
@@ -631,15 +607,17 @@ class ShapermintConnector(BaseConnector):
         if max_review_pages <= 0:
             return reviews
 
-        # ── 2. API paginée (texte) ────────────────────────────────────────
+        # 2. API paginée (texte seulement)
         product_uuid = product.get("uuid") or product.get("id")
         if not product_uuid:
             log.debug("Shapermint reviews : uuid absent, skip API")
             return reviews
 
-        meta            = ssr_reviews.get("metadata") or {}
-        total_pages_api = int(meta.get("total_pages", 1))
-        pages_to_fetch  = min(max_review_pages, total_pages_api)
+        # Calculer le nb de pages API (20 avis/page)
+        rs = product.get("review_score") or {}
+        total_reviews = int(rs.get("total_reviews") or 0)
+        api_total_pages = math.ceil(total_reviews / 20) if total_reviews else 1
+        pages_to_fetch  = min(max_review_pages, api_total_pages)
 
         from app.scraping.http_client import HttpClient
         client = HttpClient(
@@ -653,7 +631,7 @@ class ShapermintConnector(BaseConnector):
                 resp = client.get(
                     _REVIEWS_API_URL,
                     params={
-                        "product_uuid":   product_uuid,
+                        "product_uuid":   str(product_uuid),
                         "page":           page_num,
                         "page_size":      20,
                         "without_images": "true",
@@ -709,7 +687,6 @@ class ShapermintConnector(BaseConnector):
 
     @staticmethod
     def _normalize_review(r: dict, has_image: bool) -> dict:
-        """Normalise un avis vers un dict commun."""
         return {
             "id":           r.get("id", ""),
             "rating":       r.get("rating"),
@@ -726,7 +703,7 @@ class ShapermintConnector(BaseConnector):
     def _extract_collection_products(self, html: str) -> tuple[list[dict], int]:
         """
         Extrait la liste de produits et le nombre total de pages depuis
-        __NEXT_DATA__ d'une page de collection Shapermint.
+        __NEXT_DATA__ d'une page de collection.
         """
         m = _NEXT_DATA_RE.search(html)
         if not m:
@@ -736,9 +713,9 @@ class ShapermintConnector(BaseConnector):
         except json.JSONDecodeError:
             return [], 0
 
-        pp         = nd.get("props", {}).get("pageProps", {})
-        products   = pp.get("products") or []
-        pagination = pp.get("pagination") or {}
+        pp          = nd.get("props", {}).get("pageProps", {})
+        products    = pp.get("products") or []
+        pagination  = pp.get("pagination") or {}
         total_pages = int(pagination.get("total_pages", 1))
 
         return products, total_pages
@@ -746,10 +723,6 @@ class ShapermintConnector(BaseConnector):
     # ── Compatibilité tests (dict Shopify standard) ───────────────────────
 
     def _parse_shopify_dict(self, url: str, p: dict) -> RawProduct:
-        """
-        Compatibilité ascendante : parse un dict JSON Shopify standard.
-        Utilisé dans les tests unitaires existants.
-        """
         from app.scraping.shopify_utils import (
             clean_description, extract_colors, extract_materials,
             extract_variants_detailed, normalize_availability,
