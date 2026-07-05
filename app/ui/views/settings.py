@@ -5,6 +5,10 @@ Vue Paramètres Phase 3 — Étend la Phase 2 avec :
   - Gestion du pool de proxies rotatifs
   - Serveur API REST (activation, port, statut)
   - Tous les paramètres Phase 2 conservés
+
+Correctifs UI :
+  - Contraste amélioré sur tous les widgets (labels, spinboxes, combos, checkboxes)
+  - Bouton de reset complet de la base de données avec confirmation
 """
 from __future__ import annotations
 
@@ -45,22 +49,150 @@ from app.core.market import list_markets
 
 log = get_logger(__name__)
 
+# ── Feuille de styles globale ─────────────────────────────────────────────────
+# Appliquée à toute la vue pour garantir un contraste suffisant partout.
+_GLOBAL_STYLE = """
+    QLabel {
+        color: #1E293B;
+        font-size: 9pt;
+    }
+    QGroupBox {
+        border: 1px solid #CBD5E1;
+        border-radius: 8px;
+        background: #FFFFFF;
+        padding: 10px 14px;
+        margin-top: 4px;
+        color: #1E293B;
+        font-size: 9pt;
+        font-weight: bold;
+    }
+    QGroupBox::title {
+        color: #475569;
+        font-size: 9pt;
+        subcontrol-origin: margin;
+        left: 10px;
+    }
+    QSpinBox, QDoubleSpinBox {
+        border: 1px solid #94A3B8;
+        border-radius: 4px;
+        padding: 3px 6px;
+        background: #FFFFFF;
+        color: #1E293B;
+        font-size: 9pt;
+    }
+    QSpinBox:focus, QDoubleSpinBox:focus {
+        border-color: #2563EB;
+    }
+    QComboBox {
+        border: 1px solid #94A3B8;
+        border-radius: 4px;
+        padding: 3px 8px;
+        background: #FFFFFF;
+        color: #1E293B;
+        font-size: 9pt;
+    }
+    QComboBox:focus {
+        border-color: #2563EB;
+    }
+    QComboBox QAbstractItemView {
+        color: #1E293B;
+        background: #FFFFFF;
+        selection-background-color: #EFF6FF;
+        selection-color: #1E293B;
+    }
+    QTimeEdit {
+        border: 1px solid #94A3B8;
+        border-radius: 4px;
+        padding: 3px 6px;
+        background: #FFFFFF;
+        color: #1E293B;
+        font-size: 9pt;
+    }
+    QCheckBox {
+        color: #1E293B;
+        font-size: 9pt;
+        spacing: 6px;
+    }
+    QCheckBox::indicator {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        border: 2px solid #94A3B8;
+        background: #FFFFFF;
+    }
+    QCheckBox::indicator:checked {
+        border-color: #2563EB;
+        background: #2563EB;
+    }
+    QCheckBox::indicator:hover {
+        border-color: #2563EB;
+    }
+    QLineEdit {
+        border: 1px solid #94A3B8;
+        border-radius: 4px;
+        padding: 4px 8px;
+        background: #FFFFFF;
+        color: #1E293B;
+        font-size: 9pt;
+    }
+    QLineEdit:focus {
+        border-color: #2563EB;
+    }
+    QListWidget {
+        border: 1px solid #CBD5E1;
+        border-radius: 6px;
+        background: #FFFFFF;
+        color: #1E293B;
+        font-size: 8pt;
+        font-family: monospace;
+    }
+    QScrollArea {
+        border: none;
+        background: transparent;
+    }
+"""
+
+# ── Couleurs de boutons ───────────────────────────────────────────────────────
+_BTN_PRIMARY = (
+    "QPushButton { background: #2563EB; color: #FFFFFF; border-radius: 6px; "
+    "padding: 5px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+    "QPushButton:hover { background: #1D4ED8; }"
+    "QPushButton:disabled { background: #CBD5E1; color: #94A3B8; }"
+)
+_BTN_SUCCESS = (
+    "QPushButton { background: #16A34A; color: #FFFFFF; border-radius: 6px; "
+    "padding: 5px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+    "QPushButton:hover { background: #15803D; }"
+)
+_BTN_WARNING = (
+    "QPushButton { background: #D97706; color: #FFFFFF; border-radius: 6px; "
+    "padding: 5px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+    "QPushButton:hover { background: #B45309; }"
+)
+_BTN_DANGER = (
+    "QPushButton { background: #DC2626; color: #FFFFFF; border-radius: 6px; "
+    "padding: 5px 14px; font-size: 9pt; font-weight: bold; border: none; }"
+    "QPushButton:hover { background: #B91C1C; }"
+)
+_BTN_NEUTRAL = (
+    "QPushButton { background: #FFFFFF; color: #374151; border-radius: 6px; "
+    "padding: 5px 12px; font-size: 9pt; border: 1px solid #CBD5E1; }"
+    "QPushButton:hover { background: #F1F5F9; }"
+)
+
 
 class SectionTitle(QLabel):
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text, parent)
-        f = QFont(); f.setBold(True); f.setPointSize(10)
+        f = QFont()
+        f.setBold(True)
+        f.setPointSize(10)
         self.setFont(f)
-        self.setStyleSheet("color: #1E293B; padding-top: 8px;")
+        self.setStyleSheet("color: #1E293B; padding-top: 8px; font-size: 10pt;")
 
 
 def _make_group(title: str = "") -> QGroupBox:
     grp = QGroupBox(title)
-    grp.setStyleSheet(
-        "QGroupBox { border: 1px solid #E2E8F0; border-radius: 8px; "
-        "background: white; padding: 10px 14px; margin-top: 4px; }"
-        "QGroupBox::title { color: #64748B; font-size: 9pt; subcontrol-origin: margin; left: 10px; }"
-    )
     return grp
 
 
@@ -70,12 +202,12 @@ def _row(label: str, widget: QWidget, desc: str = "") -> QWidget:
     l.setContentsMargins(0, 2, 0, 2)
     lbl = QLabel(label)
     lbl.setMinimumWidth(200)
-    lbl.setStyleSheet("color: #475569; font-size: 9pt;")
+    lbl.setStyleSheet("color: #374151; font-size: 9pt;")
     l.addWidget(lbl)
     l.addWidget(widget)
     if desc:
         d = QLabel(desc)
-        d.setStyleSheet("color: #94A3B8; font-size: 8pt;")
+        d.setStyleSheet("color: #64748B; font-size: 8pt;")
         l.addWidget(d)
     l.addStretch()
     return w
@@ -88,8 +220,10 @@ class SettingsView(QScrollArea):
         super().__init__(parent)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet(_GLOBAL_STYLE)
 
         container = QWidget()
+        container.setStyleSheet("background: #F8FAFC;")
         main = QVBoxLayout(container)
         main.setContentsMargins(24, 16, 24, 24)
         main.setSpacing(14)
@@ -97,17 +231,21 @@ class SettingsView(QScrollArea):
 
         # Titre
         title = QLabel("Paramètres")
-        tf = QFont(); tf.setPointSize(14); tf.setBold(True)
+        tf = QFont()
+        tf.setPointSize(14)
+        tf.setBold(True)
         title.setFont(tf)
-        title.setStyleSheet("color: #1E293B;")
+        title.setStyleSheet("color: #1E293B; font-size: 14pt;")
         main.addWidget(title)
 
         subtitle = QLabel("Configuration de la plateforme Market Intelligence")
         subtitle.setStyleSheet("color: #64748B; font-size: 10pt;")
         main.addWidget(subtitle)
 
-        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #E2E8F0;"); main.addWidget(sep)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #CBD5E1; background: #CBD5E1; max-height: 1px;")
+        main.addWidget(sep)
 
         # ── MARCHÉ GÉOGRAPHIQUE ───────────────────────────────────────────
         main.addWidget(SectionTitle("🌍  Marché géographique"))
@@ -119,22 +257,17 @@ class SettingsView(QScrollArea):
             "les exports, ainsi que les en-têtes HTTP envoyés aux sites cibles."
         )
         market_info.setWordWrap(True)
-        market_info.setStyleSheet("color: #64748B; font-size: 9pt;")
+        market_info.setStyleSheet("color: #475569; font-size: 9pt;")
         market_l.addWidget(market_info)
 
-        # Combo de sélection du marché
         self._market_combo = QComboBox()
-        self._market_combo.setFixedWidth(300)
-        self._market_combo.setStyleSheet(
-            "QComboBox { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; }"
-        )
+        self._market_combo.setFixedWidth(320)
         for m in list_markets():
             flag = self._market_flag(m.slug)
             self._market_combo.addItem(
                 f"{flag}  {m.name} ({m.slug.upper()})  —  {m.currency}",
                 m.slug,
             )
-        # Sélectionner le marché actif
         current_market = getattr(settings, "MARKET", "us")
         for i in range(self._market_combo.count()):
             if self._market_combo.itemData(i) == current_market:
@@ -143,11 +276,10 @@ class SettingsView(QScrollArea):
         self._market_combo.currentIndexChanged.connect(self._on_market_changed)
         market_l.addWidget(_row("Marché actif", self._market_combo))
 
-        # Aperçu du marché sélectionné
         self._market_preview = QLabel()
         self._market_preview.setStyleSheet(
-            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; "
-            "padding: 8px 12px; color: #475569; font-size: 8pt; font-family: monospace;"
+            "background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 6px; "
+            "padding: 8px 12px; color: #374151; font-size: 8pt; font-family: monospace;"
         )
         self._market_preview.setWordWrap(True)
         market_l.addWidget(self._market_preview)
@@ -164,17 +296,21 @@ class SettingsView(QScrollArea):
         self._workers.setRange(1, 6)
         self._workers.setValue(getattr(settings, "MAX_WORKERS", 2))
         self._workers.setFixedWidth(80)
-        sc_l.addWidget(_row("Threads de scraping", self._workers, "1=séquentiel, 2-4=parallèle"))
+        sc_l.addWidget(_row("Threads de scraping", self._workers, "1 = séquentiel, 2–4 = parallèle"))
 
         self._delay_min = QDoubleSpinBox()
-        self._delay_min.setRange(0.5, 10.0); self._delay_min.setSingleStep(0.5)
-        self._delay_min.setSuffix(" s"); self._delay_min.setValue(1.5)
+        self._delay_min.setRange(0.5, 10.0)
+        self._delay_min.setSingleStep(0.5)
+        self._delay_min.setSuffix(" s")
+        self._delay_min.setValue(1.5)
         self._delay_min.setFixedWidth(90)
         sc_l.addWidget(_row("Délai minimum", self._delay_min))
 
         self._delay_max = QDoubleSpinBox()
-        self._delay_max.setRange(1.0, 20.0); self._delay_max.setSingleStep(0.5)
-        self._delay_max.setSuffix(" s"); self._delay_max.setValue(4.0)
+        self._delay_max.setRange(1.0, 20.0)
+        self._delay_max.setSingleStep(0.5)
+        self._delay_max.setSuffix(" s")
+        self._delay_max.setValue(4.0)
         self._delay_max.setFixedWidth(90)
         sc_l.addWidget(_row("Délai maximum", self._delay_max))
 
@@ -193,7 +329,7 @@ class SettingsView(QScrollArea):
 
         self._sched_mode = QComboBox()
         self._sched_mode.addItems(["Manuel", "Quotidien", "Hebdomadaire"])
-        self._sched_mode.setFixedWidth(160)
+        self._sched_mode.setFixedWidth(180)
         self._sched_mode.currentIndexChanged.connect(self._on_sched_mode_changed)
         sched_l.addWidget(_row("Mode", self._sched_mode))
 
@@ -208,13 +344,13 @@ class SettingsView(QScrollArea):
             "Lundi", "Mardi", "Mercredi", "Jeudi",
             "Vendredi", "Samedi", "Dimanche",
         ])
-        self._sched_weekday.setFixedWidth(140)
+        self._sched_weekday.setFixedWidth(160)
         self._sched_weekday_row = _row("Jour (hebdomadaire)", self._sched_weekday)
         self._sched_weekday_row.hide()
         sched_l.addWidget(self._sched_weekday_row)
 
         self._sched_status_label = QLabel("Statut : —")
-        self._sched_status_label.setStyleSheet("color: #64748B; font-size: 8pt; padding-top: 4px;")
+        self._sched_status_label.setStyleSheet("color: #475569; font-size: 8pt; padding-top: 4px;")
         sched_l.addWidget(self._sched_status_label)
 
         self._load_scheduler_config()
@@ -229,48 +365,48 @@ class SettingsView(QScrollArea):
         proxy_grp = _make_group()
         proxy_l = QVBoxLayout(proxy_grp)
 
-        proxy_l.addWidget(QLabel(
+        proxy_info_lbl = QLabel(
             "Entrez un proxy par ligne (http://user:pass@ip:port ou socks5://...) :"
-        ))
+        )
+        proxy_info_lbl.setStyleSheet("color: #374151; font-size: 9pt;")
+        proxy_l.addWidget(proxy_info_lbl)
+
         self._proxy_list_widget = QListWidget()
         self._proxy_list_widget.setMaximumHeight(120)
-        self._proxy_list_widget.setStyleSheet(
-            "QListWidget { border: 1px solid #CBD5E1; border-radius: 6px; "
-            "font-size: 8pt; font-family: monospace; }"
-        )
         proxy_l.addWidget(self._proxy_list_widget)
 
         proxy_edit_row = QHBoxLayout()
         self._proxy_input = QLineEdit()
         self._proxy_input.setPlaceholderText("http://user:pass@ip:port")
-        self._proxy_input.setStyleSheet(
-            "QLineEdit { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 8px; }"
-        )
         proxy_edit_row.addWidget(self._proxy_input, 1)
+
         btn_add_proxy = QPushButton("+ Ajouter")
-        btn_add_proxy.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border-radius: 6px; padding: 4px 10px; font-size: 8pt; }"
-        )
+        btn_add_proxy.setStyleSheet(_BTN_PRIMARY)
         btn_add_proxy.clicked.connect(self._add_proxy)
         proxy_edit_row.addWidget(btn_add_proxy)
+
         btn_remove_proxy = QPushButton("Supprimer")
-        btn_remove_proxy.setStyleSheet(
-            "QPushButton { background: #DC2626; color: white; border-radius: 6px; padding: 4px 10px; font-size: 8pt; }"
-        )
+        btn_remove_proxy.setStyleSheet(_BTN_DANGER)
         btn_remove_proxy.clicked.connect(self._remove_proxy)
         proxy_edit_row.addWidget(btn_remove_proxy)
-        proxy_edit_w = QWidget(); proxy_edit_w.setLayout(proxy_edit_row)
+
+        proxy_edit_w = QWidget()
+        proxy_edit_w.setLayout(proxy_edit_row)
         proxy_l.addWidget(proxy_edit_w)
 
         proxy_opts_row = QHBoxLayout()
-        proxy_opts_row.addWidget(QLabel("Stratégie :"))
+        strat_lbl = QLabel("Stratégie :")
+        strat_lbl.setStyleSheet("color: #374151; font-size: 9pt;")
+        proxy_opts_row.addWidget(strat_lbl)
         self._proxy_strategy = QComboBox()
         self._proxy_strategy.addItems(["round_robin", "random", "sticky"])
-        self._proxy_strategy.setFixedWidth(130)
+        self._proxy_strategy.setFixedWidth(140)
         proxy_opts_row.addWidget(self._proxy_strategy)
         proxy_opts_row.addStretch()
-        proxy_opts_w = QWidget(); proxy_opts_w.setLayout(proxy_opts_row)
+        proxy_opts_w = QWidget()
+        proxy_opts_w.setLayout(proxy_opts_row)
         proxy_l.addWidget(proxy_opts_w)
+
         self._proxy_stats_label = QLabel("")
         self._proxy_stats_label.setStyleSheet("color: #64748B; font-size: 8pt;")
         proxy_l.addWidget(self._proxy_stats_label)
@@ -281,33 +417,40 @@ class SettingsView(QScrollArea):
         main.addWidget(SectionTitle("🔌  API REST Locale"))
         api_grp = _make_group()
         api_l = QVBoxLayout(api_grp)
+
         api_info = QLabel(
             "L'API REST expose les données via HTTP pour les intégrations externes "
             "(Power BI, Google Sheets, scripts Python, etc.)."
         )
-        api_info.setWordWrap(True); api_info.setStyleSheet("color: #64748B; font-size: 9pt;")
+        api_info.setWordWrap(True)
+        api_info.setStyleSheet("color: #475569; font-size: 9pt;")
         api_l.addWidget(api_info)
+
         api_row = QHBoxLayout()
+        port_lbl = QLabel("Port :")
+        port_lbl.setStyleSheet("color: #374151; font-size: 9pt;")
         self._api_port = QSpinBox()
-        self._api_port.setRange(1024, 65535); self._api_port.setValue(8765)
+        self._api_port.setRange(1024, 65535)
+        self._api_port.setValue(8765)
         self._api_port.setFixedWidth(90)
-        api_row.addWidget(QLabel("Port :")); api_row.addWidget(self._api_port)
+        api_row.addWidget(port_lbl)
+        api_row.addWidget(self._api_port)
         api_row.addStretch()
+
         self._api_btn = QPushButton("▶ Démarrer l'API")
-        self._api_btn.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border-radius: 6px; padding: 5px 14px; font-weight: bold; }"
-            "QPushButton:hover { background: #1D4ED8; }"
-        )
+        self._api_btn.setStyleSheet(_BTN_PRIMARY)
         self._api_btn.clicked.connect(self._toggle_api)
         api_row.addWidget(self._api_btn)
+
         btn_open_docs = QPushButton("📖 Ouvrir /docs")
-        btn_open_docs.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 5px 10px; }"
-        )
+        btn_open_docs.setStyleSheet(_BTN_NEUTRAL)
         btn_open_docs.clicked.connect(self._open_api_docs)
         api_row.addWidget(btn_open_docs)
-        api_row_w = QWidget(); api_row_w.setLayout(api_row)
+
+        api_row_w = QWidget()
+        api_row_w.setLayout(api_row)
         api_l.addWidget(api_row_w)
+
         self._api_status_label = QLabel("Statut : Arrêtée")
         self._api_status_label.setStyleSheet("color: #64748B; font-size: 8pt;")
         api_l.addWidget(self._api_status_label)
@@ -317,57 +460,110 @@ class SettingsView(QScrollArea):
         main.addWidget(SectionTitle("🗄️  Base de données"))
         db_grp = _make_group()
         db_l = QVBoxLayout(db_grp)
+
+        path_title = QLabel("Chemin actuel :")
+        path_title.setStyleSheet("color: #374151; font-size: 9pt; font-weight: bold;")
+        db_l.addWidget(path_title)
+
         from app.storage.database import get_active_db_url
         active_url = get_active_db_url() or settings.DATABASE_URL
         db_path_lbl = QLabel(active_url.replace("sqlite:///", ""))
         db_path_lbl.setStyleSheet(
-            "color: #475569; font-size: 8pt; font-family: monospace; "
-            "background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 4px; padding: 4px 8px;"
+            "color: #1E293B; font-size: 8pt; font-family: monospace; "
+            "background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 4px; padding: 5px 10px;"
         )
         db_path_lbl.setWordWrap(True)
-        db_l.addWidget(QLabel("Chemin actuel :")); db_l.addWidget(db_path_lbl)
+        db_l.addWidget(db_path_lbl)
+
+        # Boutons principaux
         db_btn_row = QHBoxLayout()
-        for label, slot, style in [
-            ("✓ Tester",       self._test_db,    "border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px;"),
-            ("💾 Sauvegarder", self._backup_db,  "background: #2563EB; color: white; border-radius: 6px; padding: 4px 10px;"),
-            ("↺ Restaurer",    self._restore_db, "background: #D97706; color: white; border-radius: 6px; padding: 4px 10px;"),
-        ]:
-            btn = QPushButton(label)
-            btn.setStyleSheet(f"QPushButton {{ {style} }}")
-            btn.clicked.connect(slot)
-            db_btn_row.addWidget(btn)
+        btn_test_db = QPushButton("✓ Tester")
+        btn_test_db.setStyleSheet(_BTN_NEUTRAL)
+        btn_test_db.clicked.connect(self._test_db)
+        db_btn_row.addWidget(btn_test_db)
+
+        btn_backup = QPushButton("💾 Sauvegarder")
+        btn_backup.setStyleSheet(_BTN_PRIMARY)
+        btn_backup.clicked.connect(self._backup_db)
+        db_btn_row.addWidget(btn_backup)
+
+        btn_restore = QPushButton("↺ Restaurer")
+        btn_restore.setStyleSheet(_BTN_WARNING)
+        btn_restore.clicked.connect(self._restore_db)
+        db_btn_row.addWidget(btn_restore)
+
         db_btn_row.addStretch()
-        purge_row = QHBoxLayout()
-        purge_row.addWidget(QLabel("Purger les snapshots > "))
-        self._purge_days = QSpinBox()
-        self._purge_days.setRange(30, 365); self._purge_days.setValue(180)
-        self._purge_days.setSuffix(" jours"); self._purge_days.setFixedWidth(110)
-        purge_row.addWidget(self._purge_days)
-        btn_purge = QPushButton("Purger")
-        btn_purge.setStyleSheet(
-            "QPushButton { background: #DC2626; color: white; border-radius: 6px; padding: 4px 8px; }"
-        )
-        btn_purge.clicked.connect(self._purge_snapshots)
-        purge_row.addWidget(btn_purge); purge_row.addStretch()
-        db_btn_w = QWidget(); db_btn_w.setLayout(db_btn_row)
+        db_btn_w = QWidget()
+        db_btn_w.setLayout(db_btn_row)
         db_l.addWidget(db_btn_w)
-        purge_w = QWidget(); purge_w.setLayout(purge_row)
+
+        # Purge des snapshots
+        purge_row = QHBoxLayout()
+        purge_lbl = QLabel("Purger les snapshots > ")
+        purge_lbl.setStyleSheet("color: #374151; font-size: 9pt;")
+        purge_row.addWidget(purge_lbl)
+        self._purge_days = QSpinBox()
+        self._purge_days.setRange(30, 365)
+        self._purge_days.setValue(180)
+        self._purge_days.setSuffix(" jours")
+        self._purge_days.setFixedWidth(120)
+        purge_row.addWidget(self._purge_days)
+
+        btn_purge = QPushButton("Purger")
+        btn_purge.setStyleSheet(_BTN_DANGER)
+        btn_purge.clicked.connect(self._purge_snapshots)
+        purge_row.addWidget(btn_purge)
+        purge_row.addStretch()
+
+        purge_w = QWidget()
+        purge_w.setLayout(purge_row)
         db_l.addWidget(purge_w)
+
+        # ── Séparateur avant reset ────────────────────────────────────────
+        sep_reset = QFrame()
+        sep_reset.setFrameShape(QFrame.HLine)
+        sep_reset.setStyleSheet("color: #FCA5A5; background: #FCA5A5; max-height: 1px; margin: 6px 0;")
+        db_l.addWidget(sep_reset)
+
+        # Zone de danger : reset complet
+        danger_title = QLabel("⚠️  Zone de danger")
+        danger_title.setStyleSheet("color: #DC2626; font-size: 9pt; font-weight: bold;")
+        db_l.addWidget(danger_title)
+
+        reset_row = QHBoxLayout()
+        reset_info = QLabel(
+            "Supprime <b>toutes</b> les données de la base (produits, snapshots, "
+            "sessions, événements). Cette opération est irréversible."
+        )
+        reset_info.setWordWrap(True)
+        reset_info.setStyleSheet("color: #374151; font-size: 9pt;")
+        reset_row.addWidget(reset_info, 1)
+
+        btn_reset_db = QPushButton("🗑️  Vider la base")
+        btn_reset_db.setStyleSheet(_BTN_DANGER)
+        btn_reset_db.setMinimumWidth(140)
+        btn_reset_db.clicked.connect(self._reset_database)
+        reset_row.addWidget(btn_reset_db)
+
+        reset_w = QWidget()
+        reset_w.setLayout(reset_row)
+        db_l.addWidget(reset_w)
+
         main.addWidget(db_grp)
 
         # ── LOGS ─────────────────────────────────────────────────────────
         main.addWidget(SectionTitle("📋  Logs"))
         log_grp = _make_group()
         log_l = QVBoxLayout(log_grp)
+
         self._log_level = QComboBox()
         self._log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self._log_level.setCurrentText(getattr(settings, "LOG_LEVEL", "INFO"))
-        self._log_level.setFixedWidth(120)
+        self._log_level.setFixedWidth(140)
         log_l.addWidget(_row("Niveau de log", self._log_level))
+
         btn_open_logs = QPushButton("📁 Ouvrir le dossier de logs")
-        btn_open_logs.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px 10px; }"
-        )
+        btn_open_logs.setStyleSheet(_BTN_NEUTRAL)
         btn_open_logs.clicked.connect(self._open_log_dir)
         log_l.addWidget(btn_open_logs)
         main.addWidget(log_grp)
@@ -377,21 +573,26 @@ class SettingsView(QScrollArea):
         self._save_btn = QPushButton("💾 Sauvegarder tous les paramètres")
         self._save_btn.setMinimumHeight(36)
         self._save_btn.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
-            "font-weight: bold; padding: 0 20px; }"
+            "QPushButton { background: #2563EB; color: #FFFFFF; border-radius: 6px; "
+            "font-weight: bold; padding: 0 20px; font-size: 9pt; border: none; }"
             "QPushButton:hover { background: #1D4ED8; }"
         )
         self._save_btn.clicked.connect(self._save_all)
         action_row.addWidget(self._save_btn)
-        btn_reset = QPushButton("↺ Réinitialiser")
-        btn_reset.setMinimumHeight(36)
-        btn_reset.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 0 16px; }"
+
+        btn_reset_settings = QPushButton("↺ Réinitialiser les paramètres")
+        btn_reset_settings.setMinimumHeight(36)
+        btn_reset_settings.setStyleSheet(
+            "QPushButton { background: #FFFFFF; color: #374151; border-radius: 6px; "
+            "padding: 0 16px; font-size: 9pt; border: 1px solid #CBD5E1; }"
+            "QPushButton:hover { background: #F1F5F9; }"
         )
-        btn_reset.clicked.connect(self._reset_settings)
-        action_row.addWidget(btn_reset)
+        btn_reset_settings.clicked.connect(self._reset_settings)
+        action_row.addWidget(btn_reset_settings)
         action_row.addStretch()
-        action_w = QWidget(); action_w.setLayout(action_row)
+
+        action_w = QWidget()
+        action_w.setLayout(action_row)
         main.addWidget(action_w)
         main.addStretch()
 
@@ -406,7 +607,7 @@ class SettingsView(QScrollArea):
         try:
             m = get_market(slug)
             example_price = m.format_price(68.00)
-            example_date  = m.format_date(datetime.now())
+            example_date = m.format_date(datetime.now())
             self._market_preview.setText(
                 f"Locale : {m.locale}   |   Devise : {m.currency} ({m.currency_symbol})   |   "
                 f"Exemple prix : {example_price}   |   Exemple date : {example_date}\n"
@@ -417,7 +618,6 @@ class SettingsView(QScrollArea):
 
     @staticmethod
     def _market_flag(slug: str) -> str:
-        """Emoji drapeau approximatif pour affichage dans le combo."""
         flags = {
             "us": "🇺🇸", "fr": "🇫🇷", "de": "🇩🇪", "it": "🇮🇹",
             "es": "🇪🇸", "gb": "🇬🇧", "nl": "🇳🇱", "be": "🇧🇪",
@@ -503,7 +703,7 @@ class SettingsView(QScrollArea):
                 self._api_status_label.setText("Statut : Arrêtée")
             else:
                 port = self._api_port.value()
-                url  = start_api_server(port=port)
+                url = start_api_server(port=port)
                 self._api_btn.setText("⏹ Arrêter l'API")
                 self._api_status_label.setText(f"Statut : Active sur {url}")
         except ImportError:
@@ -527,13 +727,13 @@ class SettingsView(QScrollArea):
         from app.storage.database import get_active_db_url
         url = get_active_db_url() or ""
         if not url.startswith("sqlite:///"):
-            QMessageBox.warning(self, "Sauvegarde", "SQLite uniquement.")
+            QMessageBox.warning(self, "Sauvegarde", "Sauvegarde disponible pour SQLite uniquement.")
             return
         db_path = Path(url.replace("sqlite:///", ""))
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup = db_path.parent / f"shapewear_backup_{ts}.db"
         shutil.copy2(db_path, backup)
-        QMessageBox.information(self, "Sauvegarde OK", f"Sauvegardé :\n{backup}")
+        QMessageBox.information(self, "Sauvegarde réussie", f"Base sauvegardée :\n{backup}")
 
     def _restore_db(self) -> None:
         file, _ = QFileDialog.getOpenFileName(
@@ -542,8 +742,10 @@ class SettingsView(QScrollArea):
         if not file:
             return
         reply = QMessageBox.question(
-            self, "Restauration", "Remplacer la base actuelle ?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self, "Restauration",
+            "Remplacer la base actuelle par cette sauvegarde ?\n"
+            "Les données actuelles seront perdues.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -551,14 +753,18 @@ class SettingsView(QScrollArea):
         db_path = Path((get_active_db_url() or "").replace("sqlite:///", ""))
         dispose_engine()
         shutil.copy2(file, db_path)
-        QMessageBox.information(self, "Restauration OK", "Base restaurée. Redémarrez l'application.")
+        QMessageBox.information(
+            self, "Restauration réussie",
+            "Base restaurée avec succès.\nVeuillez redémarrer l'application."
+        )
 
     def _purge_snapshots(self) -> None:
         days = self._purge_days.value()
         reply = QMessageBox.question(
-            self, "Purge",
-            f"Supprimer les snapshots de plus de {days} jours ?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self, "Purge des snapshots",
+            f"Supprimer définitivement tous les snapshots de plus de {days} jours ?\n"
+            "Cette opération est irréversible.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -570,10 +776,75 @@ class SettingsView(QScrollArea):
             deleted = db.query(ProductSnapshot).filter(
                 ProductSnapshot.crawled_at < cutoff
             ).delete()
-        QMessageBox.information(self, "Purge", f"{deleted} snapshot(s) supprimés.")
+        QMessageBox.information(self, "Purge terminée", f"{deleted} snapshot(s) supprimés.")
+
+    def _reset_database(self) -> None:
+        """Vide complètement la base de données après double confirmation."""
+        # Première confirmation
+        reply1 = QMessageBox.warning(
+            self,
+            "⚠️  Vider la base de données",
+            "Vous êtes sur le point de <b>supprimer toutes les données</b> de la base :\n\n"
+            "• Tous les produits et leurs prix\n"
+            "• Tout l'historique des snapshots\n"
+            "• Toutes les sessions d'analyse\n"
+            "• Tous les événements de changement\n\n"
+            "Cette opération est <b>irréversible</b>.\n\n"
+            "Voulez-vous continuer ?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply1 != QMessageBox.Yes:
+            return
+
+        # Deuxième confirmation (sécurité supplémentaire)
+        reply2 = QMessageBox.critical(
+            self,
+            "Confirmation finale",
+            "⚠️  DERNIÈRE CONFIRMATION\n\n"
+            "Toutes les données seront définitivement supprimées.\n"
+            "Êtes-vous absolument certain de vouloir continuer ?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply2 != QMessageBox.Yes:
+            return
+
+        try:
+            from app.storage.database import get_db, dispose_engine, init_db
+            from app.storage.models import (
+                Base, ChangeEvent, ProductSnapshot, Variant,
+                Product, CrawlSession, Brand,
+            )
+            from sqlalchemy import text
+
+            # Supprimer toutes les données dans le bon ordre (FK)
+            with get_db() as db:
+                db.query(ChangeEvent).delete()
+                db.query(ProductSnapshot).delete()
+                db.query(Variant).delete()
+                db.query(Product).delete()
+                db.query(CrawlSession).delete()
+                db.query(Brand).delete()
+
+            log.info("Base de données vidée par l'utilisateur")
+            QMessageBox.information(
+                self,
+                "Base vidée",
+                "✓ Toutes les données ont été supprimées.\n\n"
+                "La base est maintenant vide et prête pour une nouvelle analyse.",
+            )
+        except Exception as exc:
+            log.error("Erreur reset base", error=str(exc))
+            QMessageBox.critical(
+                self,
+                "Erreur",
+                f"Une erreur est survenue lors du reset :\n{exc}",
+            )
 
     def _open_log_dir(self) -> None:
-        import subprocess, sys
+        import subprocess
+        import sys
         path = str(settings.LOG_DIR)
         if sys.platform == "win32":
             subprocess.Popen(["explorer", path])
@@ -591,15 +862,14 @@ class SettingsView(QScrollArea):
         ]
         mode_map = {0: "manual", 1: "daily", 2: "weekly"}
         t = self._sched_time.time()
-
         selected_market = self._market_combo.currentData() or "us"
 
         data = {
-            "MARKET":            selected_market,
-            "MAX_WORKERS":       self._workers.value(),
-            "LOG_LEVEL":         self._log_level.currentText(),
-            "PROXY_LIST":        proxies,
-            "PROXY_STRATEGY":    self._proxy_strategy.currentText(),
+            "MARKET":         selected_market,
+            "MAX_WORKERS":    self._workers.value(),
+            "LOG_LEVEL":      self._log_level.currentText(),
+            "PROXY_LIST":     proxies,
+            "PROXY_STRATEGY": self._proxy_strategy.currentText(),
             "schedule": {
                 "mode":    mode_map.get(self._sched_mode.currentIndex(), "manual"),
                 "hour":    t.hour(),
@@ -638,19 +908,23 @@ class SettingsView(QScrollArea):
         log.info("Paramètres sauvegardés", market=selected_market)
         QMessageBox.information(
             self, "Sauvegardé",
-            f"Paramètres enregistrés (marché : {selected_market.upper()}).\n"
-            "Certains changements nécessitent un redémarrage."
+            f"✓ Paramètres enregistrés (marché : {selected_market.upper()}).\n"
+            "Certains changements nécessitent un redémarrage de l'application.",
         )
 
     def _reset_settings(self) -> None:
         reply = QMessageBox.question(
-            self, "Réinitialiser",
-            "Supprimer settings.json et revenir aux valeurs par défaut ?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            self, "Réinitialiser les paramètres",
+            "Supprimer settings.json et revenir aux valeurs par défaut ?\n"
+            "(Cela ne supprime pas les données de la base.)",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
         p = PROJECT_ROOT / "settings.json"
         if p.exists():
             p.unlink()
-        QMessageBox.information(self, "Réinitialisé", "Redémarrez l'application.")
+        QMessageBox.information(
+            self, "Réinitialisé",
+            "Paramètres réinitialisés.\nVeuillez redémarrer l'application."
+        )
