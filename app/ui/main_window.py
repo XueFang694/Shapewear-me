@@ -1,20 +1,16 @@
 """
-MainWindow Phase 2 — Fenêtre principale PySide6 avec navigation complète.
+MainWindow Phase 2 — Fenêtre principale PySide6 avec navigation.
 
-Navigation latérale à 5 sections :
+Navigation latérale à 3 sections :
   - Dashboard   : KPIs, résumé dernière session, bouton lancer
   - Marques     : gestion des connecteurs de scraping
-  - Résultats   : tableau des produits avec filtres avancés
-  - Historique  : sessions passées et rapports
   - Paramètres  : configuration de l'application
 
-Pattern MVP : la fenêtre orchestre les vues, la logique métier est dans les workers.
-
-Changements v2.2 :
-  - ExcelExportDialog : sélecteur de mode export (Variantes / Produit principal).
-    Le mode "Variantes" est le comportement historique (une ligne par variante).
-    Le mode "Produit principal" exporte une ligne par produit avec les tailles,
-    couleurs et SKUs fusionnés dans des cellules dédiées.
+Changements v2.3 :
+  - Suppression des onglets Résultats et Historique.
+  - Le bouton "Lancer l'analyse" ouvre un dialog de sélection des marques
+    (géré dans DashboardView.run_requested qui émet une liste de slugs).
+  - ExcelExportDialog conservé pour l'export Excel multi-marque.
 """
 from __future__ import annotations
 
@@ -70,9 +66,7 @@ class ExcelExportDialog(QDialog):
     Dialog permettant de choisir quelle(s) marque(s) exporter en Excel
     et le mode d'export :
       • Variantes       — une ligne par variante couleur × taille
-                          (comportement historique, détail maximal)
-      • Produit principal — une ligne par produit, tailles / couleurs / SKUs
-                          fusionnés dans des cellules dédiées
+      • Produit principal — une ligne par produit, attributs fusionnés
     """
 
     def __init__(self, parent=None) -> None:
@@ -92,7 +86,6 @@ class ExcelExportDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(12)
 
-        # ── Titre ────────────────────────────────────────────────────────
         title = QLabel("Exporter en Excel")
         title_font = QFont()
         title_font.setPointSize(11)
@@ -106,83 +99,46 @@ class ExcelExportDialog(QDialog):
         sep0.setStyleSheet("color: #E2E8F0;")
         layout.addWidget(sep0)
 
-        # ── Section mode d'export ────────────────────────────────────────
         mode_title = QLabel("Mode d'export")
-        mode_title.setStyleSheet(
-            "color: #475569; font-weight: bold; font-size: 9pt;"
-        )
+        mode_title.setStyleSheet("color: #475569; font-weight: bold; font-size: 9pt;")
         layout.addWidget(mode_title)
 
-        # Qt QSS : technique "double-ring" sans ::after ni outline.
-        # checked   → fond violet, bordure blanche épaisse (5px) + border-radius
-        #             → cercle violet visible autour du blanc central
-        # unchecked → fond blanc, bordure grise fine
-        # Le contour violet extérieur en checked est obtenu en réduisant
-        # la taille de l'indicator de 2px (14px au lieu de 16px) et en
-        # ajoutant un padding sur le QRadioButton pour compenser.
-        _radio_style_checked = """
-            QRadioButton {
-                font-size: 9pt;
-                color: #1E293B;
-                spacing: 8px;
-            }
-            QRadioButton::indicator {
-                width: 18px;
-                height: 18px;
-                border-radius: 9px;
-            }
-            QRadioButton::indicator:unchecked {
-                border: 2px solid #94A3B8;
-                background: white;
-            }
-            QRadioButton::indicator:unchecked:hover {
-                border: 2px solid #7C3AED;
-                background: #F5F3FF;
-            }
-            QRadioButton::indicator:checked {
-                border: 5px solid #7C3AED;
-                background: white;
-            }
-            QRadioButton:checked {
-                color: #7C3AED;
-                font-weight: bold;
-            }
+        _radio_style = """
+            QRadioButton { font-size: 9pt; color: #1E293B; spacing: 8px; }
+            QRadioButton::indicator { width: 18px; height: 18px; border-radius: 9px; }
+            QRadioButton::indicator:unchecked { border: 2px solid #94A3B8; background: white; }
+            QRadioButton::indicator:unchecked:hover { border: 2px solid #7C3AED; background: #F5F3FF; }
+            QRadioButton::indicator:checked { border: 5px solid #7C3AED; background: white; }
+            QRadioButton:checked { color: #7C3AED; font-weight: bold; }
         """
 
         self._radio_variants = QRadioButton(
             "Variantes  —  une ligne par variante couleur × taille"
         )
         self._radio_variants.setChecked(True)
-        self._radio_variants.setStyleSheet(_radio_style_checked)
+        self._radio_variants.setStyleSheet(_radio_style)
         layout.addWidget(self._radio_variants)
 
-        # Description du mode variants
         desc_variants = QLabel(
             "Détail complet. Chaque combinaison couleur / taille occupe\n"
             "une ligne distincte. Idéal pour les analyses granulaires."
         )
-        desc_variants.setStyleSheet(
-            "color: #64748B; font-size: 8pt; padding-left: 24px;"
-        )
+        desc_variants.setStyleSheet("color: #64748B; font-size: 8pt; padding-left: 24px;")
         layout.addWidget(desc_variants)
 
         self._radio_product = QRadioButton(
             "Produit principal  —  une ligne par produit"
         )
-        self._radio_product.setStyleSheet(_radio_style_checked)
+        self._radio_product.setStyleSheet(_radio_style)
         layout.addWidget(self._radio_product)
 
-        # Description du mode product
         desc_product = QLabel(
             "Vue synthétique. Les couleurs, tailles et SKUs sont fusionnés\n"
             "dans des cellules dédiées, séparés par \" | \"."
         )
-        desc_product.setStyleSheet(
-            "color: #64748B; font-size: 8pt; padding-left: 24px;"
-        )
+        desc_product.setStyleSheet("color: #64748B; font-size: 8pt; padding-left: 24px;")
         layout.addWidget(desc_product)
 
-        # Grouper les boutons radio pour exclusivité mutuelle
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._radio_variants)
         self._mode_group.addButton(self._radio_product)
@@ -192,18 +148,14 @@ class ExcelExportDialog(QDialog):
         sep1.setStyleSheet("color: #E2E8F0;")
         layout.addWidget(sep1)
 
-        # ── Section sélection des marques ────────────────────────────────
         brands_title = QLabel("Marques à exporter")
-        brands_title.setStyleSheet(
-            "color: #475569; font-weight: bold; font-size: 9pt;"
-        )
+        brands_title.setStyleSheet("color: #475569; font-weight: bold; font-size: 9pt;")
         layout.addWidget(brands_title)
 
         brands_sub = QLabel("Un fichier Excel distinct sera créé par marque.")
         brands_sub.setStyleSheet("color: #64748B; font-size: 8pt;")
         layout.addWidget(brands_sub)
 
-        # Checkbox "Toutes les marques"
         self._cb_all = QCheckBox("Toutes les marques")
         self._cb_all.setStyleSheet(
             "QCheckBox { font-weight: bold; color: #1E293B; font-size: 10pt; spacing: 8px; }"
@@ -221,7 +173,6 @@ class ExcelExportDialog(QDialog):
         sep2.setStyleSheet("color: #E2E8F0;")
         layout.addWidget(sep2)
 
-        # Zone scrollable pour les marques individuelles
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -235,7 +186,6 @@ class ExcelExportDialog(QDialog):
         scroll.setWidget(self._brands_container)
         layout.addWidget(scroll)
 
-        # Note d'information dynamique
         self._info_label = QLabel("")
         self._info_label.setStyleSheet(
             "color: #475569; font-size: 8pt; "
@@ -244,7 +194,6 @@ class ExcelExportDialog(QDialog):
         self._info_label.setWordWrap(True)
         layout.addWidget(self._info_label)
 
-        # Boutons OK / Annuler
         btn_box = QDialogButtonBox()
         self._btn_export = QPushButton("📊  Exporter")
         self._btn_export.setEnabled(False)
@@ -265,7 +214,6 @@ class ExcelExportDialog(QDialog):
         self._btn_export.clicked.connect(self.accept)
         layout.addWidget(btn_box)
 
-        # Mise à jour de la note lorsqu'on change de mode
         self._radio_variants.toggled.connect(self._update_info)
         self._radio_product.toggled.connect(self._update_info)
 
@@ -276,7 +224,6 @@ class ExcelExportDialog(QDialog):
         except Exception:
             self._available_brands = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
 
-        # Vider l'ancien contenu (hors stretch)
         while self._brands_layout.count() > 1:
             item = self._brands_layout.takeAt(0)
             if item.widget():
@@ -337,18 +284,15 @@ class ExcelExportDialog(QDialog):
                 + ", ".join(f"{s}.xlsx" for s in selected)
             )
 
-    # ── Accesseurs ────────────────────────────────────────────────────────
-
     def get_selected_brands(self) -> list[str]:
         return [slug for slug, cb in self._checkboxes.items() if cb.isChecked()]
 
     def get_export_mode(self) -> str:
-        """Retourne "variants" ou "product"."""
         return "product" if self._radio_product.isChecked() else "variants"
 
 
 # ---------------------------------------------------------------------------
-# Worker thread pour le crawl (évite de bloquer l'UI)
+# Worker thread pour le crawl
 # ---------------------------------------------------------------------------
 
 class CrawlWorker(QObject):
@@ -414,11 +358,11 @@ class NavButton(QPushButton):
 
 
 # ---------------------------------------------------------------------------
-# Fenêtre principale Phase 2
+# Fenêtre principale
 # ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
-    """Fenêtre principale de l'application Market Intelligence — Phase 2."""
+    """Fenêtre principale de l'application Market Intelligence."""
 
     _log_received      = Signal(str, str)
     _progress_received = Signal(str, int, int)
@@ -440,7 +384,7 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(500, self._refresh_current_view)
 
-        log.info("Interface Phase 2 démarrée", version=settings.APP_VERSION)
+        log.info("Interface démarrée", version=settings.APP_VERSION)
 
     # -------------------------------------------------------------------
     # Scheduler
@@ -466,7 +410,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self) -> None:
         self.setWindowTitle(settings.APP_NAME)
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(1100, 660)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -540,11 +484,10 @@ class MainWindow(QMainWindow):
         sidebar_layout.addSpacing(8)
 
         self._nav_buttons: list[NavButton] = []
+        # 3 onglets seulement : Dashboard, Marques, Paramètres
         nav_items = [
             ("🏠", "Dashboard"),
             ("🔗", "Marques"),
-            ("📊", "Résultats"),
-            ("📋", "Historique"),
             ("⚙️", "Paramètres"),
         ]
         for icon, label in nav_items:
@@ -624,9 +567,6 @@ class MainWindow(QMainWindow):
 
         self._btn_excel = QPushButton("📊  Excel")
         self._btn_excel.setMinimumHeight(34)
-        self._btn_excel.setToolTip(
-            "Exporter en Excel — choisir la/les marque(s) et le mode d'export"
-        )
         self._btn_excel.setStyleSheet(
             "QPushButton { background: #7C3AED; color: white; border-radius: 6px; "
             "font-weight: bold; padding: 0 12px; font-size: 9pt; }"
@@ -667,25 +607,20 @@ class MainWindow(QMainWindow):
     def _load_views(self) -> None:
         from app.ui.views.dashboard import DashboardView
         from app.ui.views.brands    import BrandsView
-        from app.ui.views.results   import ResultsView
-        from app.ui.views.history   import HistoryView
         from app.ui.views.settings  import SettingsView
 
         self._dashboard_view = DashboardView()
         self._brands_view    = BrandsView()
-        self._results_view   = ResultsView()
-        self._history_view   = HistoryView()
         self._settings_view  = SettingsView()
 
-        self._dashboard_view.run_requested.connect(self._on_run_clicked)
+        # Le signal run_requested du Dashboard émet maintenant une liste de slugs
+        self._dashboard_view.run_requested.connect(self._on_run_with_brands)
         self._dashboard_view.export_csv_requested.connect(self._on_export_csv_clicked)
         self._dashboard_view.export_excel_requested.connect(self._on_export_excel_clicked)
 
         for view in [
             self._dashboard_view,
             self._brands_view,
-            self._results_view,
-            self._history_view,
             self._settings_view,
         ]:
             self._stack.addWidget(view)
@@ -699,9 +634,7 @@ class MainWindow(QMainWindow):
     _VIEW_MAP = {
         "Dashboard":  0,
         "Marques":    1,
-        "Résultats":  2,
-        "Historique": 3,
-        "Paramètres": 4,
+        "Paramètres": 2,
     }
 
     def _navigate_to(self, view_name: str) -> None:
@@ -736,13 +669,41 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _on_run_clicked(self) -> None:
+        """
+        Bouton "Lancer l'analyse" dans la topbar.
+        Ouvre le dialog de sélection des marques (géré dans DashboardView
+        seulement si on est sur le Dashboard, sinon ouvre un mini-dialog).
+        """
+        if self._is_running:
+            return
+        # Si on est sur le dashboard, déléguer au dashboard qui ouvre son propre dialog
+        if self._stack.currentIndex() == 0:
+            self._dashboard_view._on_run_clicked()
+        else:
+            # Sur une autre vue : ouvrir un dialog de sélection simplifié
+            self._on_run_clicked_generic()
+
+    def _on_run_clicked_generic(self) -> None:
+        """Ouvre le dialog de sélection des marques hors Dashboard."""
         if self._is_running:
             return
         try:
             from app.connectors.registry import ConnectorRegistry
-            brand_slugs = ConnectorRegistry().list_connectors()
+            available = ConnectorRegistry().list_connectors()
         except Exception:
-            brand_slugs = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
+            available = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
+
+        from app.ui.views.dashboard import BrandSelectionDialog
+        dialog = BrandSelectionDialog(available, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            selected = dialog.get_selected_brands()
+            if selected:
+                self._start_crawl(brand_slugs=selected)
+
+    def _on_run_with_brands(self, brand_slugs: list[str]) -> None:
+        """Reçoit la liste des marques choisies depuis DashboardView."""
+        if self._is_running:
+            return
         self._start_crawl(brand_slugs=brand_slugs)
 
     def _start_crawl(self, brand_slugs: list[str]) -> None:
@@ -792,10 +753,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erreur export", str(exc))
 
     def _on_export_excel_clicked(self) -> None:
-        """
-        Ouvre le dialog de sélection (marques + mode), puis exporte
-        un fichier Excel distinct pour chaque marque choisie.
-        """
         dialog = ExcelExportDialog(parent=self)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -814,10 +771,7 @@ class MainWindow(QMainWindow):
             for slug in selected:
                 path = exporter.export_brand(slug, mode=mode)
                 created_paths.append(path)
-                self._append_log(
-                    "INFO",
-                    f"Excel créé ({mode}) : {path.name}",
-                )
+                self._append_log("INFO", f"Excel créé ({mode}) : {path.name}")
 
             if len(created_paths) == 1:
                 msg = f"Fichier créé :\n{created_paths[0]}"
@@ -930,11 +884,11 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_session_completed(self, **kwargs) -> None:
-        if hasattr(self, "_history_view"):
-            QTimer.singleShot(500, self._history_view.refresh)
+        if hasattr(self, "_dashboard_view"):
+            QTimer.singleShot(500, self._dashboard_view.refresh)
 
     # -------------------------------------------------------------------
-    # Mise à jour UI (thread principal uniquement)
+    # Mise à jour UI
     # -------------------------------------------------------------------
 
     def _append_log(self, level: str, message: str) -> None:

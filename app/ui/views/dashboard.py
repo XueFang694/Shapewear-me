@@ -5,15 +5,17 @@ Affiche :
   - 4 KPI cards (produits suivis, nouveaux, changements de prix, suppressions)
   - Tableau des marques actives avec statut et compteurs
   - Résumé de la dernière session
-  - Graphique d'évolution simplifié (via QLabel/HTML)
 """
 from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QFont
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -43,13 +45,11 @@ _BRAND_COLORS = {
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
-    """Convertit une couleur hex en tuple (r, g, b)."""
     h = hex_color.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
 def _relative_luminance(r: int, g: int, b: int) -> float:
-    """Calcule la luminance relative (WCAG 2.1)."""
     def linearize(c: int) -> float:
         s = c / 255.0
         return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
@@ -63,20 +63,168 @@ def _contrast_ratio(lum1: float, lum2: float) -> float:
 
 
 def _readable_text_color(bg_hex: str) -> str:
-    """
-    Retourne '#FFFFFF' ou '#1E293B' selon lequel offre le meilleur
-    contraste WCAG sur le fond donné.
-    """
     r, g, b = _hex_to_rgb(bg_hex)
     bg_lum   = _relative_luminance(r, g, b)
     white_lum  = 1.0
-    dark_lum   = _relative_luminance(30, 41, 59)   # #1E293B
-
+    dark_lum   = _relative_luminance(30, 41, 59)
     contrast_white = _contrast_ratio(bg_lum, white_lum)
     contrast_dark  = _contrast_ratio(bg_lum, dark_lum)
-
     return "#FFFFFF" if contrast_white >= contrast_dark else "#1E293B"
 
+
+# ---------------------------------------------------------------------------
+# Dialog de sélection des marques avant le lancement
+# ---------------------------------------------------------------------------
+
+class BrandSelectionDialog(QDialog):
+    """
+    Dialog permettant de choisir quelle(s) marque(s) analyser.
+    Par défaut, toutes les marques sont cochées.
+    """
+
+    def __init__(self, available_brands: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Lancer l'analyse")
+        self.setFixedWidth(360)
+        self.setModal(True)
+        self.setStyleSheet("QDialog { background: #F8FAFC; }")
+
+        self._checkboxes: dict[str, QCheckBox] = {}
+        self._available_brands = available_brands
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        # Titre
+        title = QLabel("Choisir les marques à analyser")
+        title_font = QFont()
+        title_font.setPointSize(11)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setStyleSheet("color: #1E293B;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Sélectionnez une ou plusieurs marques à crawler.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #64748B; font-size: 9pt;")
+        layout.addWidget(subtitle)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #E2E8F0;")
+        layout.addWidget(sep)
+
+        # Checkbox "Toutes les marques"
+        _cb_style = (
+            "QCheckBox { font-size: 10pt; spacing: 8px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px; }"
+            "QCheckBox::indicator:unchecked { border: 2px solid #94A3B8; background: white; }"
+            "QCheckBox::indicator:unchecked:hover { border: 2px solid #2563EB; background: #EFF6FF; }"
+            "QCheckBox::indicator:checked { border: 2px solid #2563EB; background: #2563EB; }"
+            "QCheckBox::indicator:indeterminate { border: 2px solid #2563EB; background: #BFDBFE; }"
+        )
+
+        self._cb_all = QCheckBox("Toutes les marques")
+        self._cb_all.setStyleSheet(
+            "QCheckBox { font-weight: bold; color: #1E293B; font-size: 10pt; spacing: 8px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px; }"
+            "QCheckBox::indicator:unchecked { border: 2px solid #94A3B8; background: white; }"
+            "QCheckBox::indicator:unchecked:hover { border: 2px solid #2563EB; background: #EFF6FF; }"
+            "QCheckBox::indicator:checked { border: 2px solid #2563EB; background: #2563EB; }"
+            "QCheckBox::indicator:indeterminate { border: 2px solid #2563EB; background: #BFDBFE; }"
+        )
+        self._cb_all.setChecked(True)
+        self._cb_all.stateChanged.connect(self._on_all_toggled)
+        layout.addWidget(self._cb_all)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet("color: #E2E8F0;")
+        layout.addWidget(sep2)
+
+        # Checkboxes par marque
+        brands_widget = QWidget()
+        brands_layout = QVBoxLayout(brands_widget)
+        brands_layout.setContentsMargins(0, 0, 0, 0)
+        brands_layout.setSpacing(8)
+
+        for slug in self._available_brands:
+            color = _BRAND_COLORS.get(slug, "#2C3E50")
+            cb = QCheckBox(slug.upper())
+            cb.setChecked(True)
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {color}; font-weight: bold; font-size: 10pt; spacing: 8px; }}"
+                "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px; }"
+                "QCheckBox::indicator:unchecked { border: 2px solid #94A3B8; background: white; }"
+                f"QCheckBox::indicator:unchecked:hover {{ border: 2px solid {color}; background: #F8F8FF; }}"
+                f"QCheckBox::indicator:checked {{ border: 2px solid {color}; background: {color}; }}"
+            )
+            cb.stateChanged.connect(self._on_brand_toggled)
+            brands_layout.addWidget(cb)
+            self._checkboxes[slug] = cb
+
+        layout.addWidget(brands_widget)
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.HLine)
+        sep3.setStyleSheet("color: #E2E8F0;")
+        layout.addWidget(sep3)
+
+        # Boutons
+        btn_box = QDialogButtonBox()
+        self._btn_launch = QPushButton("▶  Lancer")
+        self._btn_launch.setStyleSheet(
+            "QPushButton { background: #2563EB; color: white; border-radius: 6px; "
+            "font-weight: bold; padding: 6px 20px; }"
+            "QPushButton:hover { background: #1D4ED8; }"
+            "QPushButton:disabled { background: #CBD5E1; color: #94A3B8; }"
+        )
+        btn_cancel = QPushButton("Annuler")
+        btn_cancel.setStyleSheet(
+            "QPushButton { border: 1px solid #CBD5E1; border-radius: 6px; padding: 6px 16px; }"
+            "QPushButton:hover { background: #F1F5F9; }"
+        )
+        btn_box.addButton(btn_cancel, QDialogButtonBox.RejectRole)
+        btn_box.addButton(self._btn_launch, QDialogButtonBox.AcceptRole)
+        btn_cancel.clicked.connect(self.reject)
+        self._btn_launch.clicked.connect(self.accept)
+        layout.addWidget(btn_box)
+
+    def _on_all_toggled(self, state: int) -> None:
+        checked = state == Qt.Checked
+        for cb in self._checkboxes.values():
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+        self._update_launch_button()
+
+    def _on_brand_toggled(self) -> None:
+        selected = self.get_selected_brands()
+        n = len(selected)
+        total = len(self._available_brands)
+        self._cb_all.blockSignals(True)
+        if n == total:
+            self._cb_all.setCheckState(Qt.Checked)
+        elif n == 0:
+            self._cb_all.setCheckState(Qt.Unchecked)
+        else:
+            self._cb_all.setCheckState(Qt.PartiallyChecked)
+        self._cb_all.blockSignals(False)
+        self._update_launch_button()
+
+    def _update_launch_button(self) -> None:
+        self._btn_launch.setEnabled(len(self.get_selected_brands()) > 0)
+
+    def get_selected_brands(self) -> list[str]:
+        return [slug for slug, cb in self._checkboxes.items() if cb.isChecked()]
+
+
+# ---------------------------------------------------------------------------
+# KPI Card
+# ---------------------------------------------------------------------------
 
 class KpiCard(QFrame):
     """Widget KPI : valeur + libellé + couleur."""
@@ -111,16 +259,20 @@ class KpiCard(QFrame):
         self._value_label.setText(value)
 
 
+# ---------------------------------------------------------------------------
+# Vue Dashboard
+# ---------------------------------------------------------------------------
+
 class DashboardView(QWidget):
     """Vue d'accueil avec KPIs et résumé de session."""
 
-    from PySide6.QtCore import Signal
-    run_requested          = Signal()
+    run_requested          = Signal(list)   # émet la liste des slugs choisis
     export_csv_requested   = Signal()
     export_excel_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._available_brands: list[str] = []
         self._setup_ui()
 
     # ── Construction ─────────────────────────────────────────────────────
@@ -143,7 +295,7 @@ class DashboardView(QWidget):
         subtitle.setStyleSheet("color: #64748B; font-size: 10pt;")
         root.addWidget(subtitle)
 
-        # ── Boutons d'action ────────────────────────────────────────────────
+        # ── Boutons d'action ─────────────────────────────────────────────
         btn_row = QHBoxLayout()
         self._btn_run = QPushButton("▶  Lancer l'analyse")
         self._btn_run.setMinimumHeight(36)
@@ -153,7 +305,7 @@ class DashboardView(QWidget):
             "QPushButton:hover { background:#1D4ED8; }"
             "QPushButton:disabled { background:#94A3B8; }"
         )
-        self._btn_run.clicked.connect(self.run_requested)
+        self._btn_run.clicked.connect(self._on_run_clicked)
         btn_row.addWidget(self._btn_run)
 
         self._btn_csv = QPushButton("⬇  Exporter CSV")
@@ -179,7 +331,7 @@ class DashboardView(QWidget):
         btn_row.addStretch()
         root.addLayout(btn_row)
 
-        # ── KPI Cards ────────────────────────────────────────────────────────
+        # ── KPI Cards ────────────────────────────────────────────────────
         kpi_grid = QGridLayout()
         kpi_grid.setSpacing(12)
         self._kpi_active   = KpiCard("Produits actifs",      "—", "#2563EB")
@@ -197,12 +349,13 @@ class DashboardView(QWidget):
         kpi_grid.addWidget(self._kpi_bs,      1, 2)
         root.addLayout(kpi_grid)
 
-        # ── Tableau des marques ──────────────────────────────────────────────
+        # ── Tableau des marques ──────────────────────────────────────────
         brands_group = QGroupBox("Marques actives")
         brands_group.setStyleSheet(
             "QGroupBox { font-weight: bold; border: 1px solid #E2E8F0; "
-            "border-radius: 8px; margin-top: 8px; padding-top: 16px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 12px; }"
+            "border-radius: 8px; margin-top: 8px; padding-top: 16px; "
+            "background: white; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 12px; color: #1E293B; }"
         )
         brands_layout = QVBoxLayout(brands_group)
 
@@ -212,35 +365,98 @@ class DashboardView(QWidget):
             "En promo", "Dernière session", "Statut"
         ])
         self._brands_table.horizontalHeader().setStretchLastSection(True)
-        self._brands_table.setAlternatingRowColors(True)
+        self._brands_table.setAlternatingRowColors(False)
         self._brands_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._brands_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._brands_table.setMaximumHeight(160)
+        self._brands_table.setMaximumHeight(180)
+        self._brands_table.verticalHeader().setVisible(False)
+        self._brands_table.setShowGrid(True)
         self._brands_table.setStyleSheet(
-            "QTableWidget { border: none; font-size: 9pt; }"
-            "QHeaderView::section { background: #F8FAFC; font-weight: bold; "
-            "border-bottom: 2px solid #E2E8F0; padding: 6px; }"
+            # Tableau et cellules
+            "QTableWidget {"
+            "  border: none;"
+            "  font-size: 9pt;"
+            "  background: white;"
+            "  color: #1E293B;"
+            "  gridline-color: #E2E8F0;"
+            "}"
+            # Cellules normales : fond blanc, texte foncé
+            "QTableWidget::item {"
+            "  padding: 6px 10px;"
+            "  border-bottom: 1px solid #F1F5F9;"
+            "  color: #1E293B;"
+            "  background: white;"
+            "}"
+            # Cellules sélectionnées
+            "QTableWidget::item:selected {"
+            "  background: #EFF6FF;"
+            "  color: #1E293B;"
+            "}"
+            # En-têtes
+            "QHeaderView::section {"
+            "  background: #F8FAFC;"
+            "  color: #374151;"
+            "  font-weight: bold;"
+            "  font-size: 9pt;"
+            "  border: none;"
+            "  border-bottom: 2px solid #E2E8F0;"
+            "  border-right: 1px solid #E2E8F0;"
+            "  padding: 6px 10px;"
+            "}"
+            "QHeaderView::section:last {"
+            "  border-right: none;"
+            "}"
         )
         brands_layout.addWidget(self._brands_table)
         root.addWidget(brands_group)
 
-        # ── Résumé dernière session ──────────────────────────────────────────
+        # ── Résumé dernière session ──────────────────────────────────────
         session_group = QGroupBox("Dernière session d'analyse")
-        session_group.setStyleSheet(brands_group.styleSheet())
+        session_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 1px solid #E2E8F0; "
+            "border-radius: 8px; margin-top: 8px; padding-top: 16px; "
+            "background: white; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 12px; color: #1E293B; }"
+        )
         session_layout = QVBoxLayout(session_group)
 
         self._session_label = QLabel("Aucune session enregistrée.")
-        self._session_label.setStyleSheet("color: #64748B; padding: 8px;")
+        self._session_label.setStyleSheet("color: #475569; padding: 8px; font-size: 9pt;")
         self._session_label.setWordWrap(True)
         session_layout.addWidget(self._session_label)
         root.addWidget(session_group)
 
         root.addStretch()
 
+    # ── Actions ──────────────────────────────────────────────────────────
+
+    def _on_run_clicked(self) -> None:
+        """Ouvre le dialog de sélection des marques, puis émet run_requested."""
+        # S'assurer que la liste des marques est à jour
+        if not self._available_brands:
+            try:
+                from app.connectors.registry import ConnectorRegistry
+                self._available_brands = ConnectorRegistry().list_connectors()
+            except Exception:
+                self._available_brands = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
+
+        dialog = BrandSelectionDialog(self._available_brands, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            selected = dialog.get_selected_brands()
+            if selected:
+                self.run_requested.emit(selected)
+
     # ── Mise à jour des données ───────────────────────────────────────────
 
     def refresh(self) -> None:
         """Recharge toutes les données depuis la base."""
+        # Mettre à jour la liste des marques disponibles
+        try:
+            from app.connectors.registry import ConnectorRegistry
+            self._available_brands = ConnectorRegistry().list_connectors()
+        except Exception:
+            self._available_brands = ["spanx", "skims", "honeylove", "shapermint", "wacoal"]
+
         try:
             self._load_data()
         except Exception as exc:
@@ -269,9 +485,7 @@ class DashboardView(QWidget):
                 .first()
             )
 
-            # Événements de la dernière session
-            new_evts   = 0
-            price_evts = 0
+            new_evts = price_evts = removed_evts = 0
             if last_session:
                 new_evts = db.query(ChangeEvent).filter_by(
                     session_id=last_session.id, event_type="product.new"
@@ -282,12 +496,10 @@ class DashboardView(QWidget):
                 removed_evts = db.query(ChangeEvent).filter_by(
                     session_id=last_session.id, event_type="product.removed"
                 ).count()
-            else:
-                removed_evts = 0
 
             removed_p = [p for p in products if not p.is_active]
 
-        # Mettre à jour les KPIs
+        # KPIs
         self._kpi_active.set_value(str(len(active_p)))
         self._kpi_new.set_value(str(new_evts))
         self._kpi_changes.set_value(str(price_evts))
@@ -314,7 +526,7 @@ class DashboardView(QWidget):
             name_item.setFont(font)
             self._brands_table.setItem(row, 0, name_item)
 
-            # Colonnes numériques : texte sombre standard
+            # Colonnes numériques : texte #1E293B explicitement sur fond blanc
             for col, value in enumerate([
                 str(active_c),
                 str(bs_c),
@@ -322,6 +534,8 @@ class DashboardView(QWidget):
             ], start=1):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
+                item.setForeground(QBrush(QColor("#1E293B")))
+                item.setBackground(QBrush(QColor("#FFFFFF")))
                 self._brands_table.setItem(row, col, item)
 
             # Dernière session
@@ -331,17 +545,20 @@ class DashboardView(QWidget):
                 date_str = "—"
             date_item = QTableWidgetItem(date_str)
             date_item.setTextAlignment(Qt.AlignCenter)
+            date_item.setForeground(QBrush(QColor("#475569")))
+            date_item.setBackground(QBrush(QColor("#FFFFFF")))
             self._brands_table.setItem(row, 4, date_item)
 
             # Statut
             status_item = QTableWidgetItem("Actif ✓")
             status_item.setForeground(QBrush(QColor("#16A34A")))
+            status_item.setBackground(QBrush(QColor("#FFFFFF")))
             status_item.setTextAlignment(Qt.AlignCenter)
             self._brands_table.setItem(row, 5, status_item)
 
         self._brands_table.resizeColumnsToContents()
 
-        # Résumé dernière session
+        # Résumé session
         if last_session:
             duration = ""
             if last_session.started_at and last_session.ended_at:
@@ -360,7 +577,6 @@ class DashboardView(QWidget):
         self._session_label.setText(text)
 
     def set_running(self, running: bool) -> None:
-        """Active/désactive le bouton pendant un crawl."""
         self._btn_run.setEnabled(not running)
         self._btn_csv.setEnabled(not running)
         self._btn_excel.setEnabled(not running)
