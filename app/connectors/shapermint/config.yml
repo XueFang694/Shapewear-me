@@ -1,13 +1,13 @@
 name: Shapermint
 slug: shapermint
 base_url: https://shapermint.com
-version: "3.0"
+version: "5.0"
 
 # Shapermint est un frontend Next.js SSR headless (Trafilea).
 # Les endpoints Shopify publics sont TOUS bloqués (404) :
 #   /products.json, /collections/<slug>/products.json
 #
-# Stratégie v3.0 :
+# Stratégie v5.0 :
 #   1. GET /collections/<slug>?page=N  → HTML avec __NEXT_DATA__ JSON embarqué
 #      → pageProps.products  (slugs + données résumées pour identifier les produits)
 #      → pageProps.pagination.total_pages
@@ -19,9 +19,10 @@ version: "3.0"
 #   3. GET https://api.shapermint.com/reviews?product_uuid=<uuid>&page=N&without_images=true
 #      → reviews texte supplémentaires (max_review_pages pages)
 #
-# engine reste "shopify_json" pour signaler que la logique interne est Shopify-based,
-# mais le connecteur effectue lui-même les fetches HTML (pas via ScrapingEngine JSON).
-engine: shopify_json
+# engine: html — ScrapingEngine passe response.text (HTML) à parse_product().
+# NE PAS mettre shopify_json ici, sinon ScrapingEngine appellera response.json()
+# sur du HTML et déclenchera un JSONDecodeError.
+engine: html
 
 rate_limit_rps: 0.3
 delay_min: 2.5
