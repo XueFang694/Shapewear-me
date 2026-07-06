@@ -120,6 +120,9 @@ class Product(Base):
     # ── Avis clients ────────────────────────────────────────────────────────
     rating: Mapped[float | None] = mapped_column(Float)
     review_count: Mapped[int | None] = mapped_column(Integer)
+    # ── Avis clients (textes) ────────────────────────────────────────────────────
+    # JSON : [{"rating": 4, "title": "...", "body": "...", "date": "...", "variant": "..."}, ...]
+    reviews_text_json: Mapped[str | None] = mapped_column(Text)
 
     # ── Matériaux (colonnes distinctes) ─────────────────────────────────────
     # Composition principale (ex: "73% Nylon, 27% Elastane")

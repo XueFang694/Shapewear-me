@@ -576,27 +576,33 @@ class ShapermintConnector(BaseConnector):
         """
         Collecte les avis depuis deux sources :
 
-        1. ssrReviews.reviews : liste des avis SSR (avec images), ~2-4 avis.
-           Peut être une liste OU un dict selon la version de la page.
+        1. ssrReviews.reviews : liste des 2 avis SSR avec photo (rendu serveur).
+        ssrReviews.metadata expose : total_reviews, total_pages, page_number,
+        page_size (= 2 sur le SSR).
 
-        2. API Shapermint (texte, sans images) :
-           GET https://api.shapermint.com/reviews
-               ?product_uuid=<uuid>&page=N&page_size=20&without_images=true
-           Nb de pages = ceil(total_reviews / 20), limité par max_review_pages.
+        2. API Shapermint paginée :
+        GET https://shapermint.com/api/reviews
+            ?product_id=<uuid>&page_number=N&page_size=<reviews_page_size>
+        Pagine depuis la page 2 jusqu'à min(max_review_pages, total_pages).
+
+        Les avis SSR (page 1) sont déjà récupérés ; on commence l'API à page_number=2.
+        Déduplication par ID sur toute la session.
         """
-        max_review_pages = int(self._config.get("max_review_pages", 3))
+        max_review_pages  = int(self._config.get("max_review_pages", 3))
+        reviews_page_size = int(self._config.get("reviews_page_size", 5))
 
-        # 1. Avis SSR (liste ou dict)
-        reviews_raw = ssr_reviews.get("reviews") or []
-        if isinstance(reviews_raw, dict):
-            reviews_list_raw: list = list(reviews_raw.values())
-        else:
-            reviews_list_raw = list(reviews_raw)
+        # 1. Avis SSR (toujours une liste sur ce site)
+        ssr_list = ssr_reviews.get("reviews") or []
+        if isinstance(ssr_list, dict):          # défense en profondeur
+            ssr_list = list(ssr_list.values())
+
+        metadata    = ssr_reviews.get("metadata") or {}
+        total_pages = int(metadata.get("total_pages", 1))
 
         reviews:  list[dict] = []
         seen_ids: set[str]   = set()
 
-        for r in reviews_list_raw:
+        for r in ssr_list:
             rid = r.get("id", "")
             if rid and rid in seen_ids:
                 continue
@@ -604,20 +610,16 @@ class ShapermintConnector(BaseConnector):
             has_img = bool(r.get("images_url") or r.get("images_file_name"))
             reviews.append(self._normalize_review(r, has_image=has_img))
 
-        if max_review_pages <= 0:
+        # 2. API paginée (pages 2 → min(max_review_pages, total_pages))
+        if max_review_pages <= 1 or total_pages <= 1:
             return reviews
 
-        # 2. API paginée (texte seulement)
         product_uuid = product.get("uuid") or product.get("id")
         if not product_uuid:
             log.debug("Shapermint reviews : uuid absent, skip API")
             return reviews
 
-        # Calculer le nb de pages API (20 avis/page)
-        rs = product.get("review_score") or {}
-        total_reviews = int(rs.get("total_reviews") or 0)
-        api_total_pages = math.ceil(total_reviews / 20) if total_reviews else 1
-        pages_to_fetch  = min(max_review_pages, api_total_pages)
+        pages_to_fetch = min(max_review_pages, total_pages)
 
         from app.scraping.http_client import HttpClient
         client = HttpClient(
@@ -626,15 +628,14 @@ class ShapermintConnector(BaseConnector):
             headers=self._config.get("headers", {}),
         )
 
-        for page_num in range(1, pages_to_fetch + 1):
+        for page_num in range(2, pages_to_fetch + 1):
             try:
                 resp = client.get(
-                    _REVIEWS_API_URL,
+                    f"{self.base_url}/api/reviews",
                     params={
-                        "product_uuid":   str(product_uuid),
-                        "page":           page_num,
-                        "page_size":      20,
-                        "without_images": "true",
+                        "product_id":  str(product_uuid),
+                        "page_number": page_num,
+                        "page_size":   reviews_page_size,
                     },
                     timeout=15,
                 )
@@ -648,7 +649,6 @@ class ShapermintConnector(BaseConnector):
                     break
 
                 body = resp.json()
-                # L'API peut retourner {reviews: [...]} ou directement une liste
                 api_reviews: list = (
                     body.get("reviews")
                     or body.get("data")
@@ -663,7 +663,8 @@ class ShapermintConnector(BaseConnector):
                     if rid and rid in seen_ids:
                         continue
                     seen_ids.add(rid)
-                    reviews.append(self._normalize_review(r, has_image=False))
+                    has_img = bool(r.get("images_url") or r.get("images_file_name"))
+                    reviews.append(self._normalize_review(r, has_image=has_img))
                     added += 1
 
                 log.debug(
@@ -673,6 +674,9 @@ class ShapermintConnector(BaseConnector):
                     new=added,
                     total=len(reviews),
                 )
+
+                if added == 0:
+                    break   # page vide → arrêt anticipé
 
             except Exception as exc:
                 log.debug(

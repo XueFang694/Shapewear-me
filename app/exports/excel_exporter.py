@@ -123,7 +123,33 @@ def _join(values: list, sep: str = " | ") -> str:
     """Joint une liste de valeurs non-vides."""
     return sep.join(str(v) for v in values if v is not None and str(v).strip())
 
-
+def _format_reviews(json_str: str | None) -> str:
+    """Formate les avis en texte lisible : une ligne par avis."""
+    if not json_str:
+        return ""
+    try:
+        reviews = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    parts = []
+    for r in reviews:
+        rating  = r.get("rating")
+        title   = r.get("title", "").strip()
+        body    = r.get("body", "").strip()
+        date    = r.get("date", "")
+        variant = r.get("variant", "").strip()
+        line = f"[{rating}★"
+        if date:
+            line += f" {date}"
+        if variant:
+            line += f" | {variant}"
+        line += "]"
+        if title:
+            line += f" {title}"
+        if body:
+            line += f" — {body}"
+        parts.append(line)
+    return "\n".join(parts)
 # ---------------------------------------------------------------------------
 # Colonnes pour chaque mode
 # ---------------------------------------------------------------------------
@@ -134,7 +160,7 @@ _PRODUCT_COLS = [
     "Catégorie brute", "Famille", "Sous-famille", "Compression", "Zones ciblées",
     "Actif", "Best Seller", "BS depuis",
     "1ère vue", "Dernière vue", "Supprimé le", "Retour stock",
-    "Note", "Nb avis",
+    "Note", "Nb avis", "Commentaires",
     "Matière principale", "Doublure",
     "% Nylon", "% Elastane", "% Polyester", "% Cotton",
     "Matière brute",
@@ -312,6 +338,7 @@ class ExcelExporter:
                         "Retour stock":       _d(product.back_in_stock_at),
                         "Note":               product.rating or "",
                         "Nb avis":            product.review_count or "",
+                        "Commentaires": _format_reviews(product.reviews_text_json),
                         "Matière principale": product.material_main or "",
                         "Doublure":           product.material_lining or "",
                         "% Nylon":            comp.get("nylon", ""),
@@ -467,6 +494,7 @@ class ExcelExporter:
                         "Retour stock":       _d(product.back_in_stock_at),
                         "Note":               product.rating or "",
                         "Nb avis":            product.review_count or "",
+                        "Commentaires": _format_reviews(product.reviews_text_json),
                         "Matière principale": product.material_main or "",
                         "Doublure":           product.material_lining or "",
                         "% Nylon":            comp.get("nylon", ""),

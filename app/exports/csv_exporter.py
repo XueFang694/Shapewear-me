@@ -67,6 +67,7 @@ COLUMNS = [
     # ── Avis ─────────────────────────────────────────────────────────
     "rating",
     "review_count",
+    "reviews_text",
 
     # ── Matériaux ─────────────────────────────────────────────────────
     "material_main",
@@ -108,6 +109,23 @@ class CsvExporter:
     def __init__(self, export_dir: Path | None = None) -> None:
         self._export_dir = export_dir or settings.EXPORT_DIR
         self._export_dir.mkdir(parents=True, exist_ok=True)
+
+    def _format_reviews_csv(json_str: str | None) -> str:
+        if not json_str:
+            return ""
+        try:
+            reviews = json.loads(json_str)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        parts = []
+        for r in reviews:
+            rating = r.get("rating", "")
+            title  = (r.get("title") or "").strip()
+            body   = (r.get("body") or "").strip()
+            text   = " — ".join(x for x in [title, body] if x)
+            if text:
+                parts.append(f"[{rating}★] {text}")
+        return " || ".join(parts)
 
     def export_from_db(
         self,
@@ -172,6 +190,7 @@ class CsvExporter:
                         "best_seller_last_seen":  self._fmt_date(product.best_seller_last_seen, market),
                         "rating":                 product.rating or "",
                         "review_count":           product.review_count or "",
+                        "reviews_text":           self._format_reviews_csv(product.reviews_text_json),
                         "material_main":          product.material_main or "",
                         "material_lining":        product.material_lining or "",
                         "material_nylon_pct":     comp.get("nylon", ""),

@@ -61,6 +61,7 @@ class NormalizedProduct:
     # Avis
     rating: float | None = None
     review_count: int | None = None
+    reviews_text_json: str | None = None   # JSON sérialisé des textes d'avis
 
     # Best Seller
     is_best_seller: bool = False
@@ -90,6 +91,7 @@ class NormalizedProduct:
             "is_best_seller": self.is_best_seller,
             "rating":        self.rating,
             "review_count":  self.review_count,
+            "reviews_text_json": self.reviews_text_json,
             "material_main": self.material_main,
             "material_lining": self.material_lining,
             "material_composition_json": self.material_composition_json,
@@ -142,6 +144,19 @@ class Normalizer:
         # Extraire best_seller et matériaux depuis extra{}
         extra = raw.extra or {}
         is_best_seller = bool(extra.get("is_best_seller", False))
+        import json as _json
+        raw_reviews: list = extra.get("reviews", []) or []
+        reviews_clean = [
+            {
+                "rating":  r.get("rating"),
+                "title":   (r.get("title") or "").strip(),
+                "body":    (r.get("body") or "").strip(),
+                "date":    r.get("date_created", "")[:10],   # YYYY-MM-DD
+                "variant": (r.get("vendor_variant_name") or r.get("variant_name") or "").strip(),
+            }
+            for r in raw_reviews
+            if (r.get("title") or r.get("body"))   # garder seulement les avis avec du texte
+        ]
         materials: dict = extra.get("materials", {})
 
         normalized = NormalizedProduct(
@@ -163,6 +178,7 @@ class Normalizer:
             availability  = raw.availability or "unknown",
             rating        = raw.rating,
             review_count  = raw.review_count,
+            reviews_text_json = _json.dumps(reviews_clean, ensure_ascii=False) if reviews_clean else None,
             is_best_seller         = is_best_seller,
             material_main          = materials.get("material_main"),
             material_lining        = materials.get("material_lining"),

@@ -74,6 +74,7 @@ class ProductRepository:
                 "material_main", "material_lining",
                 "material_composition_json", "material_raw",
                 "removed_at", "back_in_stock_at",
+                "reviews_text_json",
             )
             for field in updatable:
                 if field in product_data:

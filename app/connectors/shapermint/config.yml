@@ -36,7 +36,8 @@ pagination:
 # pour chaque produit. Chaque page contient 20 avis.
 # Mettre à 0 pour ne récupérer que les avis SSR (avec images, ~4 avis).
 # Recommandé : 3 → environ 60 avis texte + 4 avis SSR par produit.
-max_review_pages: 3
+max_review_pages: 5    # pages 2..N (la page 1 vient du SSR)
+reviews_page_size: 5   # avis par appel API (correspond à l'affichage #reviews-container)
 
 # Collections cibles (slugs vérifiés)
 target_collections:
