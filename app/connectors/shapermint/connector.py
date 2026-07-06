@@ -575,33 +575,37 @@ class ShapermintConnector(BaseConnector):
     def _collect_reviews(self, product: dict, ssr_reviews: dict) -> list[dict]:
         """
         Collecte les avis depuis deux sources :
-
-        1. ssrReviews.reviews : liste des 2 avis SSR avec photo (rendu serveur).
+    
+        1. ssrReviews.reviews : liste des avis SSR (rendu serveur).
         ssrReviews.metadata expose : total_reviews, total_pages, page_number,
-        page_size (= 2 sur le SSR).
-
+        page_size (= 0 quand le SSR n'a pas servi d'avis pour ce produit).
+    
         2. API Shapermint paginée :
-        GET https://shapermint.com/api/reviews
+        GET {base_url}/api/reviews
             ?product_id=<uuid>&page_number=N&page_size=<reviews_page_size>
-        Pagine depuis la page 2 jusqu'à min(max_review_pages, total_pages).
-
-        Les avis SSR (page 1) sont déjà récupérés ; on commence l'API à page_number=2.
+    
+        IMPORTANT : quand page_size == 0 dans les métadonnées SSR, cela signifie
+        que le serveur n'a embarqué aucun avis dans le HTML (comportement observé
+        sur certains produits comme TrueKind Ultra-Soft Essentials Brief).
+        Dans ce cas on démarre l'API à la page 1 (et non page 2 comme d'habitude).
+    
         Déduplication par ID sur toute la session.
         """
-        max_review_pages  = int(self._config.get("max_review_pages", 3))
+        max_review_pages = int(self._config.get("max_review_pages", 3))
         reviews_page_size = int(self._config.get("reviews_page_size", 5))
-
+    
         # 1. Avis SSR (toujours une liste sur ce site)
         ssr_list = ssr_reviews.get("reviews") or []
         if isinstance(ssr_list, dict):          # défense en profondeur
             ssr_list = list(ssr_list.values())
-
+    
         metadata    = ssr_reviews.get("metadata") or {}
         total_pages = int(metadata.get("total_pages", 1))
-
+        ssr_page_size = int(metadata.get("page_size", 0))
+    
         reviews:  list[dict] = []
         seen_ids: set[str]   = set()
-
+    
         for r in ssr_list:
             rid = r.get("id", "")
             if rid and rid in seen_ids:
@@ -609,26 +613,39 @@ class ShapermintConnector(BaseConnector):
             seen_ids.add(rid)
             has_img = bool(r.get("images_url") or r.get("images_file_name"))
             reviews.append(self._normalize_review(r, has_image=has_img))
-
-        # 2. API paginée (pages 2 → min(max_review_pages, total_pages))
-        if max_review_pages <= 1 or total_pages <= 1:
+    
+        # 2. API paginée
+        if max_review_pages <= 0 or total_pages <= 0:
             return reviews
-
+    
         product_uuid = product.get("uuid") or product.get("id")
         if not product_uuid:
             log.debug("Shapermint reviews : uuid absent, skip API")
             return reviews
-
-        pages_to_fetch = min(max_review_pages, total_pages)
-
+    
+        # Déterminer la page de départ :
+        # - Si le SSR a renvoyé des avis (page_size > 0), ils couvrent la page 1 → partir de 2
+        # - Si le SSR est vide (page_size == 0), démarrer l'API à la page 1
+        ssr_covered_page = metadata.get("page_number", 1)
+        if ssr_page_size == 0 or not ssr_list:
+            start_page = 1      # SSR n'a rien fourni → on couvre tout via l'API
+        else:
+            start_page = ssr_covered_page + 1  # SSR a couvert la page N → continuer à N+1
+    
+        # Nombre de pages API à parcourir (exactement max_review_pages appels)
+        end_page = min(start_page + max_review_pages - 1, total_pages)
+    
+        if start_page > end_page:
+            return reviews
+    
         from app.scraping.http_client import HttpClient
         client = HttpClient(
             delay_min=self.delay_min,
             delay_max=self.delay_max,
             headers=self._config.get("headers", {}),
         )
-
-        for page_num in range(2, pages_to_fetch + 1):
+    
+        for page_num in range(start_page, end_page + 1):
             try:
                 resp = client.get(
                     f"{self.base_url}/api/reviews",
@@ -647,7 +664,7 @@ class ShapermintConnector(BaseConnector):
                         status=resp.status_code,
                     )
                     break
-
+    
                 body = resp.json()
                 api_reviews: list = (
                     body.get("reviews")
@@ -656,7 +673,7 @@ class ShapermintConnector(BaseConnector):
                 )
                 if not api_reviews:
                     break
-
+    
                 added = 0
                 for r in api_reviews:
                     rid = r.get("id", "")
@@ -666,18 +683,18 @@ class ShapermintConnector(BaseConnector):
                     has_img = bool(r.get("images_url") or r.get("images_file_name"))
                     reviews.append(self._normalize_review(r, has_image=has_img))
                     added += 1
-
+    
                 log.debug(
                     "Shapermint reviews API page",
                     uuid=product_uuid,
-                    page=f"{page_num}/{pages_to_fetch}",
+                    page=f"{page_num}/{end_page}",
                     new=added,
                     total=len(reviews),
                 )
-
+    
                 if added == 0:
                     break   # page vide → arrêt anticipé
-
+    
             except Exception as exc:
                 log.debug(
                     "Shapermint reviews API erreur",
@@ -686,7 +703,7 @@ class ShapermintConnector(BaseConnector):
                     error=str(exc),
                 )
                 break
-
+    
         return reviews
 
     @staticmethod
