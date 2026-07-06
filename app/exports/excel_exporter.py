@@ -5,6 +5,8 @@ Exporteur Excel — deux modes d'export disponibles :
       Une ligne par variante (couleur × taille), identique au comportement
       précédent.  Si un produit n'a pas de variantes, une ligne produit est
       quand même créée.
+      Les commentaires clients ne figurent que sur la première ligne variante
+      du produit pour éviter la répétition.
 
   "product" :
       Une ligne par produit.  Les couleurs, tailles, SKUs et disponibilités
@@ -123,6 +125,7 @@ def _join(values: list, sep: str = " | ") -> str:
     """Joint une liste de valeurs non-vides."""
     return sep.join(str(v) for v in values if v is not None and str(v).strip())
 
+
 def _format_reviews(json_str: str | None) -> str:
     """Formate les avis en texte lisible : une ligne par avis."""
     if not json_str:
@@ -150,6 +153,8 @@ def _format_reviews(json_str: str | None) -> str:
             line += f" — {body}"
         parts.append(line)
     return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Colonnes pour chaque mode
 # ---------------------------------------------------------------------------
@@ -213,18 +218,6 @@ class ExcelExporter:
         filename: str | None = None,
         mode: ExportMode = "variants",
     ) -> Path:
-        """
-        Lit la base de données et génère un fichier Excel.
-
-        Args:
-            brand_slugs : filtrer par marques (None = toutes).
-            session_id  : utilisé pour le suffixe du nom de fichier.
-            filename    : nom de fichier optionnel.
-            mode        : "variants" (une ligne/variante) ou "product" (une ligne/produit).
-
-        Returns:
-            Chemin du fichier .xlsx créé.
-        """
         rows = self._load_rows(brand_slugs, mode=mode)
         return self._write_excel(rows, session_id=session_id, filename=filename, mode=mode)
 
@@ -234,17 +227,6 @@ class ExcelExporter:
         session_id: int | None = None,
         mode: ExportMode = "variants",
     ) -> Path:
-        """
-        Exporte les données d'une seule marque dans un fichier Excel dédié.
-
-        Args:
-            brand_slug : slug de la marque (ex: "spanx").
-            session_id : suffixe optionnel du nom de fichier.
-            mode       : "variants" ou "product".
-
-        Returns:
-            Chemin du fichier .xlsx créé.
-        """
         rows = self._load_rows([brand_slug], mode=mode)
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         sfx  = f"_session{session_id}" if session_id else ""
@@ -257,12 +239,6 @@ class ExcelExporter:
         session_id: int | None = None,
         mode: ExportMode = "variants",
     ) -> list[Path]:
-        """
-        Exporte chaque marque dans un fichier Excel distinct.
-
-        Returns:
-            Liste des chemins créés, un par marque active.
-        """
         from app.storage.database import get_db
         from app.storage.repository import BrandRepository
 
@@ -283,7 +259,11 @@ class ExcelExporter:
         return self._load_rows_variants(brand_slugs)
 
     def _load_rows_variants(self, brand_slugs: list[str] | None) -> list[dict]:
-        """Mode 'variants' : une ligne par variante couleur × taille."""
+        """
+        Mode 'variants' : une ligne par variante couleur × taille.
+        Les commentaires clients ne figurent que sur la première ligne de
+        chaque produit pour éviter la répétition sur toutes ses variantes.
+        """
         from app.storage.database import get_db
         from app.storage.models import Product
         from app.storage.repository import BrandRepository, SnapshotRepository, VariantRepository
@@ -319,6 +299,10 @@ class ExcelExporter:
                     except Exception:
                         zones_str = product.target_zones or ""
 
+                    # Les commentaires ne sont placés que sur la première ligne
+                    # du produit ; les lignes variantes suivantes reçoivent "".
+                    reviews_formatted = _format_reviews(product.reviews_text_json)
+
                     base = {
                         "Marque":             brand.slug,
                         "Nom":                product.name,
@@ -338,7 +322,7 @@ class ExcelExporter:
                         "Retour stock":       _d(product.back_in_stock_at),
                         "Note":               product.rating or "",
                         "Nb avis":            product.review_count or "",
-                        "Commentaires": _format_reviews(product.reviews_text_json),
+                        # Commentaires exclus du base : gérés ligne par ligne ci-dessous
                         "Matière principale": product.material_main or "",
                         "Doublure":           product.material_lining or "",
                         "% Nylon":            comp.get("nylon", ""),
@@ -355,7 +339,7 @@ class ExcelExporter:
                     }
 
                     if variants:
-                        for v in variants:
+                        for idx, v in enumerate(variants):
                             v_price = v.price if v.price is not None else prod_price
                             v_orig  = v.original_price if v.original_price is not None else prod_orig
                             v_disc  = ""
@@ -365,6 +349,8 @@ class ExcelExporter:
                                 v_disc = prod_disc
 
                             row = dict(base)
+                            # Commentaires uniquement sur la première variante
+                            row["Commentaires"] = reviews_formatted if idx == 0 else ""
                             row.update({
                                 "Couleur":           v.color or "",
                                 "Couleur canonique": v.color_canonical or v.color or "",
@@ -383,6 +369,7 @@ class ExcelExporter:
                             rows.append(row)
                     else:
                         row = dict(base)
+                        row["Commentaires"] = reviews_formatted
                         row.update({
                             "Couleur":           "",
                             "Couleur canonique": "",
@@ -435,8 +422,7 @@ class ExcelExporter:
                     except Exception:
                         zones_str = product.target_zones or ""
 
-                    # ── Agrégation des variantes ──────────────────────────
-                    # Trier les variantes pour un affichage cohérent
+                    # Agrégation des variantes
                     sorted_variants = sorted(
                         variants,
                         key=lambda v: (
@@ -445,28 +431,24 @@ class ExcelExporter:
                         ),
                     )
 
-                    # Couleurs uniques (ordre d'apparition dans les variantes triées)
                     seen_colors: list[str] = []
                     for v in sorted_variants:
                         color = (v.color_canonical or v.color or "").strip()
                         if color and color not in seen_colors:
                             seen_colors.append(color)
 
-                    # Tailles uniques dans l'ordre standard
                     seen_sizes: list[str] = []
                     for v in sorted(sorted_variants, key=lambda v: _size_sort_key(v.size or "")):
                         size = (v.size or "").strip()
                         if size and size not in seen_sizes:
                             seen_sizes.append(size)
 
-                    # SKUs uniques
                     seen_skus: list[str] = []
                     for v in sorted_variants:
                         sku = (v.sku or "").strip()
                         if sku and sku not in seen_skus:
                             seen_skus.append(sku)
 
-                    # Dispo par variante : "Couleur / Taille : Yes|No"
                     dispo_parts: list[str] = []
                     for v in sorted_variants:
                         label = " / ".join(
@@ -494,7 +476,8 @@ class ExcelExporter:
                         "Retour stock":       _d(product.back_in_stock_at),
                         "Note":               product.rating or "",
                         "Nb avis":            product.review_count or "",
-                        "Commentaires": _format_reviews(product.reviews_text_json),
+                        # En mode produit, une seule ligne = les commentaires y figurent toujours
+                        "Commentaires":       _format_reviews(product.reviews_text_json),
                         "Matière principale": product.material_main or "",
                         "Doublure":           product.material_lining or "",
                         "% Nylon":            comp.get("nylon", ""),
@@ -540,19 +523,15 @@ class ExcelExporter:
 
         df = pd.DataFrame(rows)
 
-        # Ordonner les colonnes : d'abord les colonnes communes, puis spécifiques au mode
         if mode == "product":
             ordered_cols = _PRODUCT_COLS + _PRODUCT_AGG_COLS
         else:
             ordered_cols = _PRODUCT_COLS + _VARIANT_COLS
 
-        # Ne garder que les colonnes présentes dans le DataFrame
         existing_cols = [c for c in ordered_cols if c in df.columns]
-        # Ajouter d'éventuelles colonnes non listées (sécurité)
         extra_cols = [c for c in df.columns if c not in existing_cols]
         df = df[existing_cols + extra_cols]
 
-        # Trier
         if mode == "product":
             df = _sort_product_df(df)
         else:
@@ -594,20 +573,19 @@ def _apply_formatting(path: str, sheet_name: str, mode: ExportMode = "variants")
                     horizontal="center", vertical="center", wrap_text=False
                 )
 
-            # Largeurs de colonnes et wrap sur colonnes agrégées (mode product)
-            agg_col_names = {"Couleurs", "Tailles", "SKUs", "Dispo variantes"}
+            # Colonnes agrégées (mode product) et Commentaires (les deux modes)
+            wrap_col_names = {"Couleurs", "Tailles", "SKUs", "Dispo variantes", "Commentaires"}
             header_map = {
                 cell.value: cell.column for cell in ws[1] if cell.value
             }
 
             for col_idx, col_cells in enumerate(ws.columns, start=1):
                 header_val = ws.cell(row=1, column=col_idx).value or ""
-                is_agg = header_val in agg_col_names
+                is_wrap = header_val in wrap_col_names
 
-                if is_agg and mode == "product":
-                    # Colonnes agrégées : largeur fixe + wrap activé
+                if is_wrap:
                     ws.column_dimensions[get_column_letter(col_idx)].width = 40
-                    for cell in col_cells[1:]:  # sauter l'en-tête
+                    for cell in col_cells[1:]:
                         cell.alignment = Alignment(
                             wrap_text=True, vertical="top"
                         )
@@ -623,12 +601,9 @@ def _apply_formatting(path: str, sheet_name: str, mode: ExportMode = "variants")
             # Figer la première ligne
             ws.freeze_panes = "A2"
 
-            # En mode product, auto-hauteur sur les lignes de données
-            # (openpyxl ne gère pas l'auto-hauteur ; on fixe une hauteur
-            #  raisonnable pour les colonnes à wrap)
-            if mode == "product" and any(
-                c in header_map for c in agg_col_names
-            ):
+            # Hauteur des lignes avec contenu wrap
+            has_wrap_cols = any(c in header_map for c in wrap_col_names)
+            if has_wrap_cols:
                 for row_idx in range(2, ws.max_row + 1):
                     ws.row_dimensions[row_idx].height = 60
 
