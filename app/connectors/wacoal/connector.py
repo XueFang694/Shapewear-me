@@ -1,34 +1,29 @@
 """
-Connecteur Wacoal America v1.3 — correctif BazaarVoice handle-first.
+Connecteur Wacoal America v1.4 — passKey BazaarVoice extrait dynamiquement.
 
-CORRECTIF v1.3
+CORRECTIF v1.4
 ───────────────
 
-PROBLÈME (v1.2) :
-  fetch_bv_rating() et fetch_bv_reviews() étaient appelées avec l'ID
-  numérique Shopify (ex: "9149775315160"), extrait depuis data-bv-product-id
-  dans le HTML.
+PROBLÈME (v1.3) :
+  Le passKey BazaarVoice codé en dur (`caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k`)
+  était invalide pour tous les produits → ERROR_PARAM_INVALID_API_KEY systématique
+  → count=0 et reviews=[] sur tous les produits.
 
-  Or la configuration du pixel BazaarVoice de Wacoal, exposée dans le HTML
-  de chaque page produit, indique explicitement :
-      "use_external_ids": "false"
-      "external_id_attribute": "default"
-
-  Cela signifie que l'API REST BV Conversations identifie les produits Wacoal
-  par leur handle Shopify (ex: "back-appeal-shaping-body-briefer-praline"),
-  pas par leur ID numérique. D'où les count=0 systématiques.
+CAUSE IDENTIFIÉE :
+  Le vrai passKey est la `storefront_api_key` injectée dans chaque page produit
+  par le pixel Shopify BazaarVoice (id 2305851608). Sa valeur est
+  `8aa6f9892dc1113e84be4fe1f3d29c49` (visible dans le bloc webPixelsConfigList).
+  Ce champ n'avait jamais été utilisé — l'ancienne clé provenait d'une source
+  incorrecte.
 
 SOLUTION :
-  1. extract_bv_identifiers() (html_utils.py) extrait maintenant les deux
-     identifiants : handle (depuis mntn_product_data.handle) ET ID numérique
-     (depuis data-bv-product-id).
-  2. fetch_bv_rating_with_fallback() et fetch_bv_reviews_with_fallback()
-     (html_utils.py) testent le handle en priorité, puis l'ID numérique en
-     fallback.
-  3. Le connecteur appelle désormais ces fonctions "with_fallback" au lieu
-     des fonctions mono-identifiant.
+  1. `extract_bv_pass_key(html)` (html_utils.py) extrait la clé depuis le HTML
+     du fetch HTML déjà effectué (pas de requête supplémentaire).
+  2. La clé est transmise via le paramètre `pass_key` des fonctions BV.
+  3. La constante statique `_BV_PASS_KEY` dans html_utils.py est aussi corrigée
+     comme fallback en cas d'échec d'extraction.
 
-AUCUN AUTRE CHANGEMENT PAR RAPPORT À v1.2.
+AUCUN AUTRE CHANGEMENT par rapport à v1.3.
 """
 from __future__ import annotations
 
@@ -40,6 +35,7 @@ from app.connectors.base import BaseConnector, Category, ConnectorMeta, RawProdu
 from app.connectors.wacoal.html_utils import (
     apply_html_availability_to_variants,
     extract_bv_identifiers,
+    extract_bv_pass_key,
     extract_materials_from_wacoal_html,
     extract_variant_availability_from_html,
     fetch_bv_rating_with_fallback,
@@ -83,7 +79,7 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
 
     def get_metadata(self) -> ConnectorMeta:
         return ConnectorMeta(
-            name="Wacoal America", slug="wacoal", version="1.3",
+            name="Wacoal America", slug="wacoal", version="1.4",
             engine="shopify_json", base_url=self.base_url,
         )
 
@@ -103,7 +99,6 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
     # ── URLs produits ─────────────────────────────────────────────────────
 
     def get_product_urls(self, category: Category) -> list[str]:
-        # Fusionner les en-têtes marché avant pagination
         if self._market:
             market_headers = self._market.get_http_headers()
             original_headers = self._config.get("headers", {})
@@ -137,7 +132,6 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
         on_sale = bool(compare and price and compare > price)
         currency = self._market.currency if self._market else "USD"
 
-        # Catégorie brute
         category_raw = p.get("product_type") or None
         if not category_raw:
             for tag in tags:
@@ -153,11 +147,17 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
         all_sizes = extract_sizes(variants)
         cup_sizes = extract_cup_size_wacoal(all_sizes)
 
-        # Variantes Shopify
         detailed_variants = extract_variants_detailed(variants, options)
 
-        # ── Fetch HTML unique (mutualisé pour matières, dispo, BV) ────────
+        # ── Fetch HTML unique (mutualisé pour tous les champs HTML) ───────
         html_content = self._fetch_product_html(url)
+
+        # ── CORRECTIF v1.4 : extraire le passKey BV depuis le HTML ────────
+        bv_pass_key = extract_bv_pass_key(html_content) if html_content else None
+        if bv_pass_key:
+            log.debug("PassKey BV extrait du HTML", url=url, key_prefix=bv_pass_key[:8])
+        else:
+            log.debug("PassKey BV fallback statique utilisé", url=url)
 
         # ── 1. Matières ───────────────────────────────────────────────────
         materials = extract_materials_from_wacoal_html(html_content)
@@ -193,30 +193,22 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
         else:
             availability = self._resolve_availability(variants, url)
 
-        # ── 3. Note et avis BazaarVoice — CORRECTIF v1.3 ─────────────────
+        # ── 3. Note et avis BazaarVoice ───────────────────────────────────
         #
-        # AVANT (v1.2) :
-        #   bv_product_id = _extract_bv_product_id(html_content)  # → ID numérique
-        #   → fetch_bv_rating(bv_product_id)   # count=0 car BV indexe par handle
-        #   → fetch_bv_reviews(bv_product_id)  # count=0 pour la même raison
+        # CORRECTIF v1.4 : `pass_key=bv_pass_key` transmis à toutes les
+        # fonctions BV. Le passKey est maintenant extrait depuis le HTML de la
+        # page produit (storefront_api_key du pixel 2305851608), ce qui garantit
+        # l'utilisation de la clé valide pour chaque requête.
         #
-        # APRÈS (v1.3) :
-        #   handle, numeric_id = extract_bv_identifiers(html_content)
-        #   → fetch_bv_rating_with_fallback(handle, numeric_id)
-        #       1. Tente avec handle (ex: "back-appeal-shaping-body-briefer-praline")
-        #       2. Si vide → tente avec ID numérique (fallback)
-        #   → fetch_bv_reviews_with_fallback(handle, numeric_id)  (idem)
-        #
-        # La config pixel BazaarVoice dans le HTML confirme :
-        #   "use_external_ids": "false", "external_id_attribute": "default"
-        #   → BV identifie les produits Wacoal par leur handle Shopify.
+        # Avant v1.4 : _BV_PASS_KEY = "caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k"
+        #              → ERROR_PARAM_INVALID_API_KEY → count=0 systématique
+        # Après v1.4  : pass_key = "8aa6f9892dc1113e84be4fe1f3d29c49" (depuis HTML)
+        #              → requêtes BV fonctionnelles
 
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
 
-        # Extraire les deux identifiants BV depuis le HTML (handle + ID numérique)
         bv_handle, bv_numeric_id = extract_bv_identifiers(html_content)
 
-        # Fallback sur l'ID extrait du JSON Shopify si extract_bv_identifiers échoue
         if not bv_handle and not bv_numeric_id:
             bv_numeric_id = str(p.get("id", "")) or None
 
@@ -234,13 +226,13 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
                 delay_min=self.delay_min,
                 delay_max=self.delay_max,
                 headers=self._config.get("headers", {}),
+                pass_key=bv_pass_key,  # CORRECTIF v1.4
             )
             if rating is None:
                 rating = bv_rating
             if review_count is None:
                 review_count = bv_count
 
-        # Avis texte BazaarVoice
         reviews_data: list[dict] = []
         if bv_handle or bv_numeric_id:
             reviews_data = fetch_bv_reviews_with_fallback(
@@ -250,6 +242,7 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
                 delay_min=self.delay_min,
                 delay_max=self.delay_max,
                 headers=self._config.get("headers", {}),
+                pass_key=bv_pass_key,  # CORRECTIF v1.4
             )
             if reviews_data:
                 log.debug(
@@ -300,8 +293,7 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
     def _fetch_product_html(self, json_url: str) -> str:
         """
         Fetche la page HTML d'un produit Wacoal depuis son URL JSON.
-
-        Ce fetch est mutualisé : les matières, la disponibilité et les avis
+        Ce fetch est mutualisé : matières, disponibilité, passKey BV et avis
         sont tous extraits depuis ce HTML unique (un seul appel HTTP).
         Retourne "" en cas d'échec (non bloquant).
         """

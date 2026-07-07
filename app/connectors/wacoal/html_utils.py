@@ -1,39 +1,26 @@
 """
 Fonctions d'extraction HTML spécifiques aux pages produit Wacoal America.
 
-Wacoal est un site Shopify standard dont les pages HTML contiennent :
-  1. Matières — dans <span class="metafield-single_line_text_field"> à l'intérieur
-     de la section "fabric/care" du composant ProductDescList.
-     Exemple : "Lace: 88% Nylon/ 12% Spandex; Body: 65% Nylon/ 35% Spandex;
-                Panel Lining: 100% Cotton"
+CORRECTIF PASSKEY v1.4
+───────────────────────
+PROBLÈME (v1.3) : Le passKey BazaarVoice `caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k`
+codé en dur était invalide (ERROR_PARAM_INVALID_API_KEY systématique).
 
-  2. Disponibilité par variante — dans le JSON Shopify embarqué `mntn_product_data`
-     (ou `Shop._PRODUCT_JSON_`). Wacoal masque inventory_quantity et inventory_policy ;
-     le champ "available" (boolean) est la seule source fiable par variante.
+CAUSE : Le vrai passKey est la `storefront_api_key` injectée dans chaque page produit
+Wacoal par le pixel Shopify BazaarVoice (id 2305851608) dans le bloc
+`webPixelsConfigList`. Sa valeur actuelle est `8aa6f9892dc1113e84be4fe1f3d29c49`.
 
-  3. Note et avis — via BazaarVoice Conversations API v5.4.
+SOLUTION :
+  1. `extract_bv_pass_key(html)` extrait dynamiquement la clé depuis le HTML de
+     la page produit → résistant aux rotations de clé par Wacoal.
+  2. `_BV_PASS_KEY` est mis à jour comme fallback statique avec la vraie valeur.
+  3. `fetch_bv_rating()` et `fetch_bv_reviews()` acceptent un paramètre `pass_key`
+     optionnel ; les fonctions `_with_fallback` le transmettent depuis le HTML.
+  4. `fetch_bv_rating_with_fallback()` et `fetch_bv_reviews_with_fallback()` ont
+     un nouveau paramètre `pass_key` qui, s'il est fourni (extrait du HTML), est
+     préféré à la constante statique.
 
-CORRECTIF AVIS v1.3
-────────────────────
-PROBLÈME CONSTATÉ : count=0 sur tous les produits malgré une réponse HTTP 200.
-
-CAUSE : L'API BV Conversations indexe les produits par leur handle Shopify
-(ex: "back-appeal-shaping-body-briefer-praline"), PAS par l'ID Shopify numérique
-(ex: 9149775315160). Le champ data-bv-product-id dans le HTML expose l'ID
-numérique pour le widget JS côté navigateur, mais l'API REST BV Conversations
-l'identifie via le handle.
-
-SOLUTION : Stratégie multi-identifiant avec 3 tentatives dans l'ordre de
-probabilité de succès :
-  1. Handle Shopify (extrait de mntn_product_data.handle dans le HTML)
-  2. ID numérique Shopify (data-bv-product-id, fallback)
-  3. Handle depuis l'URL produit (dernier recours)
-
-De plus, le passkey utilisé dans fetch_bv_rating() et fetch_bv_reviews() doit
-correspondre au passkey public Wacoal extrait du fichier bv.js déployé. Ce passkey
-est visible dans l'URL :
-  //apps.bazaarvoice.com/deployments/wacoal/main_site/production/en_US/bv.js
-et dans la configuration du pixel Shopify BazaarVoice (id 2305851608).
+Toutes les autres fonctionnalités sont inchangées.
 """
 from __future__ import annotations
 
@@ -50,22 +37,73 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 # Passkey public BazaarVoice pour wacoal/main_site/production/en_US.
-# Extrait du fichier deployé :
-#   apps.bazaarvoice.com/deployments/wacoal/main_site/production/en_US/bv.js
-# Ce passkey est public (visible dans le JS client) et donne accès en lecture
-# aux statistiques agrégées uniquement (note, nombre d'avis). Aucune donnée
-# personnelle n'est exposée.
-_BV_PASS_KEY = "caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k"
-_BV_STATS_URL = "https://api.bazaarvoice.com/data/statistics.json"
+# CORRECTIF v1.4 : valeur corrigée à partir de storefront_api_key extraite
+# du pixel Shopify BazaarVoice (webPixelsConfigList id=2305851608) présent
+# dans chaque page produit Wacoal.
+# L'ancienne valeur `caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k` était
+# invalide et provoquait ERROR_PARAM_INVALID_API_KEY sur toutes les requêtes.
+_BV_PASS_KEY = "8aa6f9892dc1113e84be4fe1f3d29c49"
+
+_BV_STATS_URL   = "https://api.bazaarvoice.com/data/statistics.json"
 _BV_REVIEWS_URL = "https://api.bazaarvoice.com/data/reviews.json"
 
-# Wacoal indexe ses produits dans BV par leur handle Shopify.
-# Confirmé par : config pixel BV use_external_ids=false + external_id_attribute=default
-# → BV gère ses propres IDs qui correspondent aux handles produit Shopify.
-_BV_ID_TYPE = "handle"   # "handle" ou "numeric" — détermine l'ordre de tentative
+_BV_ID_TYPE = "handle"
 
 # ---------------------------------------------------------------------------
-# Patterns de fibres (identiques à shopify_utils mais avec variantes Wacoal)
+# Pattern d'extraction du passKey depuis le HTML
+# ---------------------------------------------------------------------------
+
+# Le passKey est dans la configuration du pixel BazaarVoice Shopify :
+#   "id":"2305851608","configuration":"{...\"storefront_api_key\":\"<KEY>\"...}"
+# Cette regex extrait la valeur directement depuis le JSON de configuration.
+_BV_PASSKEY_RE = re.compile(
+    r'"id"\s*:\s*"2305851608"[^}]*?"configuration"\s*:\s*"[^"]*?'
+    r'storefront_api_key\\*":\s*\\*"([a-f0-9]{32})',
+    re.DOTALL,
+)
+
+# Fallback : extraction directe depuis la chaîne storefront_api_key
+_BV_PASSKEY_FALLBACK_RE = re.compile(
+    r'storefront_api_key\\*["\':\s]+\\*["\']([a-f0-9]{32})'
+)
+
+
+def extract_bv_pass_key(html: str) -> str | None:
+    """
+    Extrait dynamiquement le passKey BazaarVoice depuis le HTML d'une page produit Wacoal.
+
+    Le passKey est la `storefront_api_key` injectée par le pixel Shopify BazaarVoice
+    (id 2305851608) dans le bloc `webPixelsConfigList`. Cette extraction garantit
+    que la clé reste valide même si Wacoal la fait tourner.
+
+    Retourne None si la clé n'est pas trouvée (le fallback statique sera utilisé).
+
+    Exemple de structure HTML ciblée :
+        {"id":"2305851608","configuration":"{...\"storefront_api_key\":\"8aa6f...\"}"}
+    """
+    if not html:
+        return None
+
+    # Tentative 1 : extraction ciblée via l'id du pixel BV
+    m = _BV_PASSKEY_RE.search(html)
+    if m:
+        key = m.group(1)
+        log.debug("PassKey BV extrait du pixel 2305851608", key=key[:8] + "…")
+        return key
+
+    # Tentative 2 : extraction directe de storefront_api_key (toute occurrence)
+    m2 = _BV_PASSKEY_FALLBACK_RE.search(html)
+    if m2:
+        key = m2.group(1)
+        log.debug("PassKey BV extrait (fallback storefront_api_key)", key=key[:8] + "…")
+        return key
+
+    log.debug("PassKey BV non trouvé dans le HTML, utilisation du fallback statique")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Patterns de fibres
 # ---------------------------------------------------------------------------
 
 _FIBER_PATTERNS: list[tuple[str, str]] = [
@@ -94,30 +132,13 @@ _LINING_KEYWORDS = frozenset({"lining", "liner", "lined", "gusset", "crotch"})
 def extract_materials_from_wacoal_html(html: str) -> dict:
     """
     Extrait la composition textile depuis le HTML d'une page produit Wacoal.
-
-    Source : <span class="metafield-single_line_text_field"> dans la section
-    "fabric/care" du composant ProductDescList.
-
-    Format attendu (exemples réels) :
-      "Lace: 88% Nylon/ 12% Spandex; Body: 65% Nylon/ 35% Spandex;
-       Panel Lining: 100% Cotton"
-      "Lace: 75% Nylon/25% Spandex; Back: 67% Nylon/33% Spandex;
-       Crotch Lining: 100% Cotton"
-
-    Retourne un dict avec :
-        material_raw                : texte brut complet
-        material_main               : composition hors doublure
-        material_lining             : doublure/gusset/crotch (si présent)
-        material_composition_json   : {"nylon": 73.5, "elastane": 26.5}
-
-    Retourne {} si aucune composition n'est trouvée.
+    (Inchangé par rapport à v1.3)
     """
     if not html:
         return {}
 
     raw_text: str | None = None
 
-    # Pattern principal : après "Fabric content:" dans la section ProductDescList-copy
     m = re.search(
         r'[Ff]abric content[^<]{0,50}'
         r'metafield-single_line_text_field["\s>]+([^<]{5,400})</span>',
@@ -127,7 +148,6 @@ def extract_materials_from_wacoal_html(html: str) -> dict:
     if m:
         raw_text = m.group(1).strip()
 
-    # Fallback : tout metafield-single_line_text_field contenant un "%"
     if not raw_text:
         candidates = re.findall(
             r'metafield-single_line_text_field["\s>]+([^<]{5,400})</span>',
@@ -186,29 +206,19 @@ def extract_materials_from_wacoal_html(html: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 2. Disponibilité par variante (depuis le JSON embarqué)
+# 2. Disponibilité par variante
 # ---------------------------------------------------------------------------
 
 def extract_variant_availability_from_html(html: str) -> dict[str, bool]:
     """
-    Extrait un mapping {sku: available} depuis le JSON Shopify embarqué dans
-    la page HTML produit Wacoal.
-
-    Wacoal masque inventory_quantity et inventory_policy dans son JSON Shopify.
-    Le champ "available" (boolean) est la seule source fiable par variante et
-    il est exposé dans les deux objets JSON inline :
-      - mntn_product_data
-      - Shop._PRODUCT_JSON_
-
-    Retourne un dict {sku: bool}, ex : {"801303.269.37C": False, "801303.269.40C": True}
-    Retourne {} si aucune donnée n'est trouvée.
+    Extrait un mapping {sku: available} depuis le JSON Shopify embarqué.
+    (Inchangé par rapport à v1.3)
     """
     if not html:
         return {}
 
     variants_data: list[dict] = []
 
-    # Priorité 1 : mntn_product_data (données complètes)
     m = re.search(r"mntn_product_data\s*=\s*(\{.*?\});\s*\n", html, re.DOTALL)
     if m:
         try:
@@ -217,7 +227,6 @@ def extract_variant_availability_from_html(html: str) -> dict[str, bool]:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Fallback : Shop._PRODUCT_JSON_
     if not variants_data:
         m2 = re.search(r"Shop\._PRODUCT_JSON_\s*=\s*(\{.*?\});\s*\n", html, re.DOTALL)
         if m2:
@@ -250,11 +259,8 @@ def apply_html_availability_to_variants(
     sku_availability: dict[str, bool],
 ) -> list[dict]:
     """
-    Applique le mapping {sku: available} extrait de la page HTML aux variantes
-    déjà parsées depuis le JSON Shopify.
-
-    Modifie chaque variante en place (copie) et retourne la liste mise à jour.
-    Les variantes sans SKU dans le mapping ne sont pas modifiées.
+    Applique le mapping {sku: available} aux variantes parsées depuis l'API JSON.
+    (Inchangé par rapport à v1.3)
     """
     if not sku_availability:
         return variants
@@ -263,49 +269,38 @@ def apply_html_availability_to_variants(
     for v in variants:
         sku = v.get("sku", "")
         if sku and sku in sku_availability:
-            v = dict(v)  # copie pour ne pas muter l'original
+            v = dict(v)
             v["available"] = sku_availability[sku]
         updated.append(v)
     return updated
 
 
 # ---------------------------------------------------------------------------
-# 3. Extraction des identifiants BazaarVoice depuis le HTML
+# 3. Extraction des identifiants BazaarVoice
 # ---------------------------------------------------------------------------
 
-# data-bv-product-id dans le HTML contient l'ID Shopify numérique.
-# Wacoal BV indexe par handle → on extrait aussi le handle depuis mntn_product_data.
 _BV_PRODUCT_ID_RE = re.compile(r'data-bv-product-id="(\d+)"')
 _MNTN_HANDLE_RE   = re.compile(r'mntn_product_data\s*=\s*\{[^}]*"handle"\s*:\s*"([^"]+)"')
 
 
 def extract_bv_identifiers(html: str) -> tuple[str | None, str | None]:
     """
-    Extrait les deux identifiants BazaarVoice depuis le HTML d'une page produit Wacoal :
-      1. handle Shopify   (ex: "back-appeal-shaping-body-briefer-praline")
-      2. ID numérique     (ex: "9149775315160")
-
-    Wacoal BV indexe ses produits par handle (use_external_ids=false dans la config
-    pixel BazaarVoice). Le handle est donc à tester en premier.
-
-    Retourne (handle, numeric_id) — l'un ou l'autre peut être None.
+    Extrait handle Shopify et ID numérique BazaarVoice depuis le HTML.
+    (Inchangé par rapport à v1.3)
     """
     if not html:
         return None, None
 
-    # Handle depuis mntn_product_data (le plus fiable)
     handle: str | None = None
     m_handle = _MNTN_HANDLE_RE.search(html)
     if m_handle:
         handle = m_handle.group(1).strip()
 
-    # Fallback handle : depuis l'URL og:url ou canonical
     if not handle:
         m_og = re.search(r'og:url"[^>]+content="[^"]+/products/([^"]+)"', html)
         if m_og:
             handle = m_og.group(1).strip().rstrip("/")
 
-    # ID numérique depuis data-bv-product-id
     numeric_id: str | None = None
     m_id = _BV_PRODUCT_ID_RE.search(html)
     if m_id:
@@ -320,7 +315,7 @@ def extract_bv_identifiers(html: str) -> tuple[str | None, str | None]:
 
 
 # ---------------------------------------------------------------------------
-# 4. Note et avis — API BazaarVoice Statistics + Reviews
+# 4. Note et avis — API BazaarVoice
 # ---------------------------------------------------------------------------
 
 def fetch_bv_rating(
@@ -328,24 +323,18 @@ def fetch_bv_rating(
     delay_min: float = 1.0,
     delay_max: float = 3.0,
     headers: dict | None = None,
+    pass_key: str | None = None,
 ) -> tuple[float | None, int | None]:
     """
     Récupère la note moyenne et le nombre d'avis via l'API BazaarVoice Statistics.
 
-    CORRECTIF v1.3 : cette fonction accepte maintenant directement un product_id
-    (handle ou ID numérique). Elle est appelée depuis fetch_bv_rating_with_fallback()
-    qui gère les tentatives multiples.
-
-    Endpoint :
-        GET https://api.bazaarvoice.com/data/statistics.json
-            ?passKey=<BV_PASS_KEY>
-            &productId=<product_id>
-            &stats=Reviews
-
-    Retourne (rating, review_count) ou (None, None) en cas d'échec ou si non trouvé.
+    CORRECTIF v1.4 : paramètre `pass_key` ajouté. Si fourni (extrait dynamiquement
+    du HTML), il est utilisé à la place de la constante `_BV_PASS_KEY`.
     """
     if not product_id:
         return None, None
+
+    key = pass_key or _BV_PASS_KEY
 
     try:
         from app.scraping.http_client import HttpClient
@@ -358,7 +347,7 @@ def fetch_bv_rating(
         response = client.get(
             _BV_STATS_URL,
             params={
-                "passKey":   _BV_PASS_KEY,
+                "passKey":   key,
                 "productId": product_id,
                 "stats":     "Reviews",
             },
@@ -374,6 +363,20 @@ def fetch_bv_rating(
             return None, None
 
         data = response.json()
+
+        # Détecter une clé invalide sans déclencher d'exception
+        errors = data.get("Errors", [])
+        if errors:
+            for err in errors:
+                if "invalid" in (err.get("Message") or "").lower():
+                    log.warning(
+                        "BazaarVoice passKey invalide",
+                        product_id=product_id,
+                        key_prefix=key[:8],
+                        error=err.get("Message"),
+                    )
+                    return None, None
+
         results = data.get("Results", [])
         if not results:
             return None, None
@@ -408,26 +411,22 @@ def fetch_bv_rating_with_fallback(
     delay_min: float = 1.0,
     delay_max: float = 3.0,
     headers: dict | None = None,
+    pass_key: str | None = None,
 ) -> tuple[float | None, int | None]:
     """
     Récupère la note BV avec stratégie multi-identifiant.
 
-    Wacoal BV indexe par handle Shopify en priorité. Si le handle échoue
-    (Results vide), on tente avec l'ID numérique.
-
-    Args:
-        handle     : handle Shopify (ex: "back-appeal-shaping-body-briefer-praline")
-        numeric_id : ID Shopify numérique en string (ex: "9149775315160")
-
-    Retourne (rating, review_count) ou (None, None) si aucun résultat.
+    CORRECTIF v1.4 : paramètre `pass_key` propagé à `fetch_bv_rating()`.
+    Utilise le passKey extrait dynamiquement du HTML si fourni.
     """
-    # Tentative 1 : handle Shopify (identifiant BV privilégié pour Wacoal)
+    # Tentative 1 : handle Shopify
     if handle:
         rating, count = fetch_bv_rating(
             handle,
             delay_min=delay_min,
             delay_max=delay_max,
             headers=headers,
+            pass_key=pass_key,
         )
         if rating is not None or count is not None:
             log.debug("BazaarVoice Stats trouvé via handle", handle=handle)
@@ -440,6 +439,7 @@ def fetch_bv_rating_with_fallback(
             delay_min=delay_min,
             delay_max=delay_max,
             headers=headers,
+            pass_key=pass_key,
         )
         if rating is not None or count is not None:
             log.debug("BazaarVoice Stats trouvé via numeric_id", numeric_id=numeric_id)
@@ -459,25 +459,18 @@ def fetch_bv_reviews(
     delay_min: float = 1.0,
     delay_max: float = 3.0,
     headers: dict | None = None,
+    pass_key: str | None = None,
 ) -> list[dict]:
     """
     Récupère les avis texte via l'API BazaarVoice Reviews.
 
-    CORRECTIF v1.3 : product_id doit être le handle Shopify, pas l'ID numérique.
-    Appelée depuis fetch_bv_reviews_with_fallback() qui gère les tentatives.
-
-    Endpoint :
-        GET https://api.bazaarvoice.com/data/reviews.json
-            ?passKey=<BV_PASS_KEY>
-            &ProductId=<product_id>
-            &Limit=<limit>
-            &Offset=0
-            &Sort=SubmissionTime:desc
-
-    Retourne [] en cas d'échec ou si aucun avis.
+    CORRECTIF v1.4 : paramètre `pass_key` ajouté. Si fourni (extrait dynamiquement
+    du HTML), il est utilisé à la place de la constante `_BV_PASS_KEY`.
     """
     if not product_id:
         return []
+
+    key = pass_key or _BV_PASS_KEY
 
     try:
         from app.scraping.http_client import HttpClient
@@ -490,9 +483,9 @@ def fetch_bv_reviews(
         response = client.get(
             _BV_REVIEWS_URL,
             params={
-                "passKey":   _BV_PASS_KEY,
+                "passKey":   key,
                 "ProductId": product_id,
-                "Limit":     str(min(limit, 100)),  # BV max = 100 par page
+                "Limit":     str(min(limit, 100)),
                 "Offset":    "0",
                 "Sort":      "SubmissionTime:desc",
             },
@@ -508,21 +501,34 @@ def fetch_bv_reviews(
             return []
 
         data = response.json()
+
+        # Détecter une clé invalide
+        errors = data.get("Errors", [])
+        if errors:
+            for err in errors:
+                if "invalid" in (err.get("Message") or "").lower():
+                    log.warning(
+                        "BazaarVoice passKey invalide (reviews)",
+                        product_id=product_id,
+                        key_prefix=key[:8],
+                        error=err.get("Message"),
+                    )
+                    return []
+
         raw_reviews = data.get("Results", [])
 
         reviews: list[dict] = []
         for r in raw_reviews:
-            rating = r.get("Rating")
-            title  = (r.get("Title") or "").strip()
-            text   = (r.get("ReviewText") or "").strip()
-            date_raw = r.get("SubmissionTime", "")[:10]  # "YYYY-MM-DDT..." → "YYYY-MM-DD"
+            rating   = r.get("Rating")
+            title    = (r.get("Title") or "").strip()
+            text     = (r.get("ReviewText") or "").strip()
+            date_raw = r.get("SubmissionTime", "")[:10]
             author   = (r.get("UserNickname") or "").strip()
 
-            # Extraire la variante si disponible dans ContextDataValues
             ctx_data = r.get("ContextDataValues", {})
             variant_parts: list[str] = []
-            for key in ("Size", "Color", "Shade"):
-                val = ctx_data.get(key, {})
+            for k in ("Size", "Color", "Shade"):
+                val = ctx_data.get(k, {})
                 if isinstance(val, dict):
                     v = val.get("Value") or val.get("DimensionLabel", "")
                 else:
@@ -564,19 +570,15 @@ def fetch_bv_reviews_with_fallback(
     delay_min: float = 1.0,
     delay_max: float = 3.0,
     headers: dict | None = None,
+    pass_key: str | None = None,
 ) -> list[dict]:
     """
     Récupère les avis BV avec stratégie multi-identifiant.
 
-    Tente d'abord avec le handle Shopify, puis avec l'ID numérique en fallback.
-
-    Args:
-        handle     : handle Shopify (ex: "back-appeal-shaping-body-briefer-praline")
-        numeric_id : ID Shopify numérique en string (ex: "9149775315160")
-
-    Retourne la liste des avis (peut être vide si aucun n'est trouvé).
+    CORRECTIF v1.4 : paramètre `pass_key` propagé à `fetch_bv_reviews()`.
+    Utilise le passKey extrait dynamiquement du HTML si fourni.
     """
-    # Tentative 1 : handle Shopify (identifiant BV privilégié pour Wacoal)
+    # Tentative 1 : handle Shopify
     if handle:
         reviews = fetch_bv_reviews(
             handle,
@@ -584,6 +586,7 @@ def fetch_bv_reviews_with_fallback(
             delay_min=delay_min,
             delay_max=delay_max,
             headers=headers,
+            pass_key=pass_key,
         )
         if reviews:
             log.debug(
@@ -593,7 +596,7 @@ def fetch_bv_reviews_with_fallback(
             )
             return reviews
 
-    # Tentative 2 : ID numérique (fallback)
+    # Tentative 2 : ID numérique
     if numeric_id and numeric_id != handle:
         reviews = fetch_bv_reviews(
             numeric_id,
@@ -601,6 +604,7 @@ def fetch_bv_reviews_with_fallback(
             delay_min=delay_min,
             delay_max=delay_max,
             headers=headers,
+            pass_key=pass_key,
         )
         if reviews:
             log.debug(
