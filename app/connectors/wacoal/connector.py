@@ -1,52 +1,34 @@
 """
-Connecteur Wacoal America v1.2 — matières, disponibilité et avis.
+Connecteur Wacoal America v1.3 — correctif BazaarVoice handle-first.
 
-CORRECTIFS v1.2
+CORRECTIF v1.3
 ───────────────
 
-1. MATIÈRES (nouveau)
-   Le JSON Shopify /products/<handle>.json de Wacoal n'expose pas la composition
-   textile. Elle est dans le HTML de la page produit, dans un span
-   <span class="metafield-single_line_text_field"> au sein de la section
-   "fabric/care" du composant ProductDescList.
-   → Un fetch HTML est effectué une fois par produit (mutualisé avec la
-     disponibilité et les avis) via _fetch_product_html().
-   → extract_materials_from_wacoal_html() extrait et normalise la composition.
+PROBLÈME (v1.2) :
+  fetch_bv_rating() et fetch_bv_reviews() étaient appelées avec l'ID
+  numérique Shopify (ex: "9149775315160"), extrait depuis data-bv-product-id
+  dans le HTML.
 
-2. DISPONIBILITÉ VARIANTE (correctif)
-   Wacoal masque inventory_quantity et inventory_policy dans son JSON Shopify.
-   La logique générique _variant_is_available() (shopify_utils.py) considère
-   comme "cas ambigu" toute variante dont available=False et qty est absent,
-   et retourne True par défaut — ce qui est incorrect pour Wacoal.
-   → Le HTML de la page produit expose le même JSON Shopify (mntn_product_data
-     ou Shop._PRODUCT_JSON_) avec le champ "available" (boolean) par variante.
-   → extract_variant_availability_from_html() lit directement ce boolean.
-   → apply_html_availability_to_variants() l'applique aux variantes parsées.
-   → La disponibilité globale du produit est recalculée à partir des variantes
-     corrigées.
+  Or la configuration du pixel BazaarVoice de Wacoal, exposée dans le HTML
+  de chaque page produit, indique explicitement :
+      "use_external_ids": "false"
+      "external_id_attribute": "default"
 
-3. NOTE ET AVIS (nouveau)
-   BazaarVoice est chargé de façon asynchrone (JS) ; les divs data-bv-show
-   sont vides dans le HTML statique. Les metafields Yotpo/Loox sont null.
-   → fetch_bv_rating() appelle l'API BazaarVoice Statistics avec le passkey
-     public Wacoal pour récupérer (rating, review_count).
-   → fetch_bv_reviews() appelle l'API BazaarVoice Reviews pour récupérer
-     les avis texte (titre, corps, note, variante, date), stockés en JSON.
-   → Le product_id BazaarVoice est l'ID Shopify numérique du produit,
-     exposé dans la page HTML via data-bv-product-id.
-   → Si l'API BV échoue (réseau, rate-limit), on tombe silencieusement sur
-     (None, None) et la suite du pipeline n'est pas impactée.
+  Cela signifie que l'API REST BV Conversations identifie les produits Wacoal
+  par leur handle Shopify (ex: "back-appeal-shaping-body-briefer-praline"),
+  pas par leur ID numérique. D'où les count=0 systématiques.
 
-ARCHITECTURE
-────────────
-  _fetch_product_html()          : un seul fetch HTML par produit (mutualisé)
-  extract_materials_from_wacoal_html()      : matières depuis le HTML
-  extract_variant_availability_from_html()  : disponibilité depuis le HTML
-  apply_html_availability_to_variants()     : correction des variantes
-  fetch_bv_rating()                         : note via API BazaarVoice
-  fetch_bv_reviews()                        : avis via API BazaarVoice
+SOLUTION :
+  1. extract_bv_identifiers() (html_utils.py) extrait maintenant les deux
+     identifiants : handle (depuis mntn_product_data.handle) ET ID numérique
+     (depuis data-bv-product-id).
+  2. fetch_bv_rating_with_fallback() et fetch_bv_reviews_with_fallback()
+     (html_utils.py) testent le handle en priorité, puis l'ID numérique en
+     fallback.
+  3. Le connecteur appelle désormais ces fonctions "with_fallback" au lieu
+     des fonctions mono-identifiant.
 
-  Tout cela est importé depuis app/connectors/wacoal/html_utils.py.
+AUCUN AUTRE CHANGEMENT PAR RAPPORT À v1.2.
 """
 from __future__ import annotations
 
@@ -57,10 +39,11 @@ from typing import Any
 from app.connectors.base import BaseConnector, Category, ConnectorMeta, RawProduct
 from app.connectors.wacoal.html_utils import (
     apply_html_availability_to_variants,
+    extract_bv_identifiers,
     extract_materials_from_wacoal_html,
     extract_variant_availability_from_html,
-    fetch_bv_rating,
-    fetch_bv_reviews,
+    fetch_bv_rating_with_fallback,
+    fetch_bv_reviews_with_fallback,
 )
 from app.connectors.wacoal.mapping import (
     extract_best_seller_wacoal,
@@ -84,9 +67,6 @@ from app.core.logger import get_logger
 log = get_logger(__name__)
 _CONFIG_PATH = Path(__file__).parent / "config.yml"
 
-# Regex pour extraire l'identifiant BazaarVoice depuis la page HTML produit
-_BV_PRODUCT_ID_RE = re.compile(r'data-bv-product-id="(\d+)"')
-
 
 class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
 
@@ -103,7 +83,7 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
 
     def get_metadata(self) -> ConnectorMeta:
         return ConnectorMeta(
-            name="Wacoal America", slug="wacoal", version="1.2",
+            name="Wacoal America", slug="wacoal", version="1.3",
             engine="shopify_json", base_url=self.base_url,
         )
 
@@ -182,7 +162,6 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
         # ── 1. Matières ───────────────────────────────────────────────────
         materials = extract_materials_from_wacoal_html(html_content)
         if not materials:
-            # Fallback : tentative d'extraction depuis le body_html JSON
             from app.scraping.shopify_utils import extract_materials as _json_mats
             materials = _json_mats(p.get("body_html"))
         if materials:
@@ -194,14 +173,11 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
             )
 
         # ── 2. Disponibilité variante corrigée ────────────────────────────
-        # Wacoal masque inventory_quantity dans son JSON Shopify.
-        # Le champ "available" (boolean) dans le HTML est la source fiable.
         sku_availability = extract_variant_availability_from_html(html_content)
         if sku_availability:
             detailed_variants = apply_html_availability_to_variants(
                 detailed_variants, sku_availability
             )
-            # Recalculer la disponibilité globale depuis les variantes corrigées
             availability = (
                 "in_stock"
                 if any(v.get("available", False) for v in detailed_variants)
@@ -215,21 +191,46 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
                 total=len(detailed_variants),
             )
         else:
-            # Fallback : logique générique (moins fiable pour Wacoal)
             availability = self._resolve_availability(variants, url)
 
-        # ── 3. Note et avis BazaarVoice ───────────────────────────────────
-        # La note n'est pas dans le JSON Shopify ni dans le HTML statique.
-        # On utilise d'abord le produit JSON (metafields si disponibles),
-        # puis l'API BazaarVoice en fallback.
+        # ── 3. Note et avis BazaarVoice — CORRECTIF v1.3 ─────────────────
+        #
+        # AVANT (v1.2) :
+        #   bv_product_id = _extract_bv_product_id(html_content)  # → ID numérique
+        #   → fetch_bv_rating(bv_product_id)   # count=0 car BV indexe par handle
+        #   → fetch_bv_reviews(bv_product_id)  # count=0 pour la même raison
+        #
+        # APRÈS (v1.3) :
+        #   handle, numeric_id = extract_bv_identifiers(html_content)
+        #   → fetch_bv_rating_with_fallback(handle, numeric_id)
+        #       1. Tente avec handle (ex: "back-appeal-shaping-body-briefer-praline")
+        #       2. Si vide → tente avec ID numérique (fallback)
+        #   → fetch_bv_reviews_with_fallback(handle, numeric_id)  (idem)
+        #
+        # La config pixel BazaarVoice dans le HTML confirme :
+        #   "use_external_ids": "false", "external_id_attribute": "default"
+        #   → BV identifie les produits Wacoal par leur handle Shopify.
+
         rating, review_count = extract_rating_and_reviews(p.get("metafields"))
 
-        # Extraire le product_id BazaarVoice depuis le HTML
-        bv_product_id = _extract_bv_product_id(html_content) or str(p.get("id", ""))
+        # Extraire les deux identifiants BV depuis le HTML (handle + ID numérique)
+        bv_handle, bv_numeric_id = extract_bv_identifiers(html_content)
 
-        if (rating is None or review_count is None) and bv_product_id:
-            bv_rating, bv_count = fetch_bv_rating(
-                bv_product_id,
+        # Fallback sur l'ID extrait du JSON Shopify si extract_bv_identifiers échoue
+        if not bv_handle and not bv_numeric_id:
+            bv_numeric_id = str(p.get("id", "")) or None
+
+        log.debug(
+            "Wacoal BV identifiants",
+            url=url,
+            handle=bv_handle,
+            numeric_id=bv_numeric_id,
+        )
+
+        if (rating is None or review_count is None) and (bv_handle or bv_numeric_id):
+            bv_rating, bv_count = fetch_bv_rating_with_fallback(
+                handle=bv_handle,
+                numeric_id=bv_numeric_id,
                 delay_min=self.delay_min,
                 delay_max=self.delay_max,
                 headers=self._config.get("headers", {}),
@@ -241,9 +242,10 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
 
         # Avis texte BazaarVoice
         reviews_data: list[dict] = []
-        if bv_product_id:
-            reviews_data = fetch_bv_reviews(
-                bv_product_id,
+        if bv_handle or bv_numeric_id:
+            reviews_data = fetch_bv_reviews_with_fallback(
+                handle=bv_handle,
+                numeric_id=bv_numeric_id,
                 limit=100,
                 delay_min=self.delay_min,
                 delay_max=self.delay_max,
@@ -251,10 +253,11 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
             )
             if reviews_data:
                 log.debug(
-                    "Wacoal avis BV",
+                    "Wacoal avis BV récupérés",
                     url=url,
                     count=len(reviews_data),
                     rating=rating,
+                    via_handle=bool(bv_handle),
                 )
 
         return RawProduct(
@@ -287,7 +290,8 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
                 "materials":         materials,
                 "detailed_variants": detailed_variants,
                 "reviews":           reviews_data,
-                "bv_product_id":     bv_product_id,
+                "bv_handle":         bv_handle,
+                "bv_numeric_id":     bv_numeric_id,
             },
         )
 
@@ -324,11 +328,3 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
                 error=str(exc),
             )
         return ""
-
-
-def _extract_bv_product_id(html: str) -> str | None:
-    """Extrait l'identifiant BazaarVoice (= ID Shopify) depuis le HTML."""
-    if not html:
-        return None
-    m = _BV_PRODUCT_ID_RE.search(html)
-    return m.group(1) if m else None
