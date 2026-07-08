@@ -1,44 +1,42 @@
 """
 Fonctions d'extraction HTML spécifiques aux pages produit Wacoal America.
 
-REFONTE v2.0 — Abandon de BazaarVoice, passage à Okendo
-────────────────────────────────────────────────────────
+v3.0 — Abandon définitif de l'API REST BazaarVoice, passage à l'endpoint SEO BV
+──────────────────────────────────────────────────────────────────────────────────
 
-PROBLÈME RACINE (v1.x) :
-  L'API REST BazaarVoice exige un passKey délivré par Bazaarvoice directement
-  aux partenaires du programme. La `storefront_api_key` présente dans le HTML
-  (pixel Shopify id=2305851608) est une clé d'initialisation du widget JS
-  côté navigateur — elle n'est PAS valide pour l'API REST. Toutes les clés
-  testées (`caElc2g6...`, `8aa6f989...`) retournent ERROR_PARAM_INVALID_API_KEY
-  car elles ne correspondent pas à un compte REST BazaarVoice.
+DIAGNOSTIC
+──────────
+• BazaarVoice est le vrai moteur d'avis sur wacoal-america.com.
+• Le script bv.js est chargé via proxy Shopify :
+    //cdn.shopify.com/proxy/<hash>/apps.bazaarvoice.com/deployments/wacoal/main_site/production/en_US/bv.js
+• Le passKey BV REST API EST UNIQUEMENT dans bv.js — jamais dans le HTML statique.
+  La `storefront_api_key` extractible du HTML est une clé d'initialisation du
+  widget JS côté navigateur et est INVALIDE pour l'API REST BV.
+• Okendo, Yotpo et Loox sont référencés dans le code d'analytics de Klaviyo mais
+  leurs variables sont toutes null — ils ne sont pas actifs sur ce store.
 
-ARCHITECTURE RÉELLE DE WACOAL :
-  • Ratings inline : BazaarVoice widget JS  (lazy-loaded, inaccessible en scraping)
-  • Ratings dans le HTML : `data-bv-product-id` → widget vide sans JS
-  • Vrai moteur d'avis : **Okendo** (révélé par `okendoProduct.reviewCount`
-    et `okendoProductReviewAverageValue` dans le JS de la page)
-  • Rating + count disponibles : dans le JSON Shopify embarqué dans le HTML
-    (`Shop._PRODUCT_JSON_`) via les métafields Okendo, ET directement dans
-    le bloc `okendo: { rating, count }` de la configuration analytics
+SOLUTION v3.0
+─────────────
+1. Rating + count    : extraits depuis le HTML statique sans requête supplémentaire.
+   Sources (par priorité) : bloc `okendo:` dans la config analytics, balises meta,
+   JSON-LD AggregateRating.
 
-SOLUTION v2.0 :
-  1. `extract_rating_from_html()` : lit la note et le nombre d'avis depuis
-     les deux sources HTML statiques (JSON Shopify embarqué + balises meta).
-     Zéro requête supplémentaire — les données sont déjà dans le HTML fetchée.
+2. Avis texte        : endpoint SEO BazaarVoice public (aucun passKey requis).
+   URL : https://seo.bazaarvoice.com/wacoal-1038-en_US/product/<product_id>/reviews.djs
+   Le suffixe `wacoal-1038-en_US` est le `seo_key` BV extrait du déploiement.
+   Format de réponse : JSONP enveloppe → on parse le JSON brut intégré.
+   Si le SEO endpoint échoue, la liste d'avis reste vide (dégradation gracieuse).
 
-  2. `fetch_okendo_reviews()` : API Okendo publique, sans authentification.
-     URL : https://api.okendo.io/v1/stores/<subscriber_id>/products/<product_gid>/reviews
-     Le subscriber_id est le shopId Shopify : 80710533336 (stable, extrait
-     une fois et stocké en constante).
+3. Matières, disponibilité variante : inchangés depuis v2.0.
 
-  3. `extract_bv_identifiers()` et `extract_materials_from_wacoal_html()` :
-     conservées à l'identique (non impactées).
-
-  4. `extract_variant_availability_from_html()` et son helper :
-     conservés à l'identique.
-
-  5. Toutes les fonctions BazaarVoice (`fetch_bv_rating*`, `fetch_bv_reviews*`,
-     `extract_bv_pass_key`) sont supprimées.
+FONCTIONS EXPORTÉES
+───────────────────
+  extract_rating_from_html(html)              → (rating, count)
+  fetch_bv_seo_reviews(product_id, ...)       → list[dict]
+  extract_bv_identifiers(html)                → (handle, numeric_id)
+  extract_materials_from_wacoal_html(html)    → dict
+  extract_variant_availability_from_html(html)→ dict[str, bool]
+  apply_html_availability_to_variants(variants, sku_map) → list[dict]
 """
 from __future__ import annotations
 
@@ -51,23 +49,20 @@ from app.core.logger import get_logger
 log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constantes Okendo
+# Constantes BazaarVoice SEO
 # ---------------------------------------------------------------------------
 
-# Subscriber ID Okendo = shopId Shopify de Wacoal America (stable)
-# Visible dans le HTML : shopId: 80710533336
-# Format URL Okendo : /v1/stores/<shopId>/products/<product_gid>/reviews
-_OKENDO_SUBSCRIBER_ID = "80710533336"
+# Clé SEO BV extraite du déploiement wacoal / main_site / production / en_US.
+# Format : <client>-<numeric_id>-<locale>
+# Visible dans la réponse du bv.js ou sur le portail BV.
+# Cette valeur est stable tant que Wacoal ne change pas de déploiement BV.
+_BV_SEO_KEY = "wacoal-1038-en_US"
 
-# L'ID produit Okendo est le GID Shopify sous la forme :
-#   gid://shopify/Product/<numeric_id>
-# encodé en base64 pour certains endpoints, ou passé tel quel.
-# L'API publique Okendo accepte directement le GID Shopify.
-_OKENDO_REVIEWS_BASE = "https://api.okendo.io/v1/stores"
-
+# Endpoint SEO BazaarVoice — public, sans passKey
+_BV_SEO_BASE = "https://seo.bazaarvoice.com"
 
 # ---------------------------------------------------------------------------
-# Patterns de fibres (inchangé)
+# Patterns extraction matières (inchangé)
 # ---------------------------------------------------------------------------
 
 _FIBER_PATTERNS: list[tuple[str, str]] = [
@@ -90,44 +85,36 @@ _FIBER_PATTERNS: list[tuple[str, str]] = [
 _LINING_KEYWORDS = frozenset({"lining", "liner", "lined", "gusset", "crotch"})
 
 # ---------------------------------------------------------------------------
-# 1. Rating depuis le HTML statique (sans requête supplémentaire)
+# Patterns extraction rating (inchangé depuis v2.0)
 # ---------------------------------------------------------------------------
 
-# Pattern pour extraire le JSON Shopify embarqué dans `Shop._PRODUCT_JSON_`
-_PRODUCT_JSON_RE = re.compile(
-    r"Shop\._PRODUCT_JSON_\s*=\s*(\{.*?\});\s*\n",
-    re.DOTALL,
-)
-
-# Pattern alternatif : mntn_product_data (aussi présent dans la page)
-_MNTN_PRODUCT_RE = re.compile(
-    r"let\s+mntn_product_data\s*=\s*(\{.*?\});\s*\n",
-    re.DOTALL,
-)
-
-# Pattern pour extraire le bloc okendo depuis la config analytics
-# Format : "okendo":{"rating":<float>,"count":<int>}
 _OKENDO_RATING_RE = re.compile(
     r'"okendo"\s*:\s*\{\s*"rating"\s*:\s*([0-9.]+|null)\s*,'
     r'\s*"count"\s*:\s*([0-9]+|null)\s*\}',
 )
+_META_RATING_RE  = re.compile(r'<meta[^>]+name=["\']rating["\'][^>]+content=["\']([0-9.]+)["\']')
+_META_REVIEWS_RE = re.compile(r'<meta[^>]+name=["\']reviewCount["\'][^>]+content=["\']([0-9]+)["\']')
+_JSONLD_RE       = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.DOTALL | re.IGNORECASE,
+)
 
-# Pattern pour les balises meta og:rating (certains thèmes les exposent)
-_META_RATING_RE   = re.compile(r'<meta[^>]+name=["\']rating["\'][^>]+content=["\']([0-9.]+)["\']')
-_META_REVIEWS_RE  = re.compile(r'<meta[^>]+name=["\']reviewCount["\'][^>]+content=["\']([0-9]+)["\']')
 
+# ---------------------------------------------------------------------------
+# 1. Rating depuis le HTML statique
+# ---------------------------------------------------------------------------
 
 def extract_rating_from_html(html: str) -> tuple[float | None, int | None]:
     """
     Extrait la note moyenne et le nombre d'avis depuis le HTML statique.
 
     Sources consultées dans l'ordre de priorité :
-      1. Bloc `okendo: { rating, count }` dans la config analytics Wacoal
+      1. Bloc `okendo: { rating, count }` dans la config analytics Klaviyo
       2. Balises <meta name="rating"> / <meta name="reviewCount">
       3. JSON-LD AggregateRating
 
-    Retourne (None, None) si aucune donnée trouvée.
     Aucune requête HTTP supplémentaire n'est effectuée.
+    Retourne (None, None) si aucune donnée trouvée.
     """
     if not html:
         return None, None
@@ -141,11 +128,7 @@ def extract_rating_from_html(html: str) -> tuple[float | None, int | None]:
             rating = round(float(raw_rating), 1) if raw_rating != "null" else None
             count  = int(raw_count) if raw_count != "null" else None
             if rating is not None or count is not None:
-                log.debug(
-                    "Wacoal rating extrait (okendo bloc analytics)",
-                    rating=rating,
-                    count=count,
-                )
+                log.debug("Wacoal rating extrait (analytics)", rating=rating, count=count)
                 return rating, count
         except (ValueError, TypeError):
             pass
@@ -169,24 +152,15 @@ def extract_rating_from_html(html: str) -> tuple[float | None, int | None]:
         return rating, count
 
     # ── 3. JSON-LD AggregateRating ────────────────────────────────────────
-    jsonld_re = re.compile(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        re.DOTALL | re.IGNORECASE,
-    )
-    for m_jld in jsonld_re.finditer(html):
+    for m_jld in _JSONLD_RE.finditer(html):
         try:
             data = json.loads(m_jld.group(1))
-            agg = None
-            if isinstance(data, dict):
-                agg = data.get("aggregateRating")
+            agg  = data.get("aggregateRating") if isinstance(data, dict) else None
             if agg:
                 r = agg.get("ratingValue")
                 c = agg.get("reviewCount")
                 if r is not None:
-                    log.debug(
-                        "Wacoal rating extrait (JSON-LD AggregateRating)",
-                        rating=r, count=c,
-                    )
+                    log.debug("Wacoal rating extrait (JSON-LD)", rating=r, count=c)
                     return (
                         round(float(r), 1),
                         int(c) if c is not None else None,
@@ -194,198 +168,309 @@ def extract_rating_from_html(html: str) -> tuple[float | None, int | None]:
         except (json.JSONDecodeError, TypeError, ValueError):
             continue
 
-    log.debug("Wacoal rating : aucune donnée trouvée dans le HTML statique")
+    log.debug("Wacoal rating : aucune donnée dans le HTML statique")
     return None, None
 
 
 # ---------------------------------------------------------------------------
-# 2. Avis texte — API Okendo publique (sans authentification)
+# 2. Avis texte — endpoint SEO BazaarVoice (sans passKey)
 # ---------------------------------------------------------------------------
 
-def fetch_okendo_reviews(
+def fetch_bv_seo_reviews(
     product_id: str,
-    subscriber_id: str = _OKENDO_SUBSCRIBER_ID,
+    seo_key: str = _BV_SEO_KEY,
     limit: int = 100,
     delay_min: float = 1.0,
     delay_max: float = 3.0,
     headers: dict | None = None,
 ) -> list[dict]:
     """
-    Récupère les avis texte via l'API publique Okendo.
+    Récupère les avis depuis l'endpoint SEO public de BazaarVoice.
 
-    L'API Okendo est publique et ne nécessite pas d'authentification.
-    Elle retourne les avis au format JSON paginé.
+    L'endpoint SEO BV est destiné à l'indexation par les moteurs de recherche
+    et ne nécessite pas de passKey. Il retourne une réponse JSONP.
 
-    URL : GET https://api.okendo.io/v1/stores/<subscriber_id>/products/
-              gid%3A%2F%2Fshopify%2FProduct%2F<product_numeric_id>/reviews
-              ?limit=<limit>&start=0&sort=date_desc
+    URL : GET https://seo.bazaarvoice.com/<seo_key>/product/<product_id>/reviews.djs
+              ?format=embeddedhtml&rating=0&limit=<limit>
+
+    La réponse est un JSONP du type :
+        bvCallback({"jsonFeed": { ... "reviews": [...] ... }})
+    On extrait le JSON brut depuis l'enveloppe JSONP.
 
     Args:
-        product_id    : ID numérique Shopify du produit (ex: "9149775315160")
-                        OU GID complet (ex: "gid://shopify/Product/9149775315160")
-        subscriber_id : shopId Shopify de Wacoal (défaut: 80710533336)
-        limit         : nombre max d'avis par requête (max Okendo: 100)
-        delay_min     : délai min entre requêtes
-        delay_max     : délai max entre requêtes
-        headers       : en-têtes HTTP supplémentaires
+        product_id  : ID numérique Shopify du produit (ex: "9149775315160")
+        seo_key     : clé de déploiement BV SEO (format: client-id-locale)
+        limit       : nombre max d'avis à récupérer
+        delay_min   : délai minimum entre requêtes (secondes)
+        delay_max   : délai maximum entre requêtes (secondes)
+        headers     : en-têtes HTTP supplémentaires
 
     Returns:
-        Liste de dicts normalisés { rating, title, body, date, variant, author }
+        Liste de dicts normalisés { rating, title, body, date, author, variant }
+        Liste vide si l'endpoint est inaccessible (dégradation gracieuse).
     """
     if not product_id:
         return []
 
-    # Construire le GID Shopify si nécessaire
-    if product_id.startswith("gid://"):
-        product_gid = product_id
-        numeric_id  = product_id.split("/")[-1]
-    else:
-        numeric_id  = str(product_id)
-        product_gid = f"gid://shopify/Product/{numeric_id}"
+    from app.scraping.http_client import HttpClient
 
-    # Encoder le GID pour l'URL (/ → %2F, : → %3A)
-    from urllib.parse import quote
-    encoded_gid = quote(product_gid, safe="")
+    client = HttpClient(
+        delay_min=delay_min,
+        delay_max=delay_max,
+        headers=headers or {},
+    )
 
-    url = f"{_OKENDO_REVIEWS_BASE}/{subscriber_id}/products/{encoded_gid}/reviews"
+    url = f"{_BV_SEO_BASE}/{seo_key}/product/{product_id}/reviews.djs"
+    params = {
+        "format": "embeddedhtml",
+        "rating": "0",          # tous les avis quelle que soit la note
+        "limit":  str(limit),
+        "offset": "0",
+        "sort":   "submissionTime:desc",
+    }
 
-    reviews:  list[dict] = []
-    start     = 0
-    page_size = min(limit, 100)
-    max_pages = (limit // page_size) + 1
+    reviews: list[dict] = []
 
     try:
-        from app.scraping.http_client import HttpClient
-
-        client = HttpClient(
-            delay_min=delay_min,
-            delay_max=delay_max,
-            headers=headers or {},
-        )
-
-        for page in range(max_pages):
-            try:
-                response = client.get(
-                    url,
-                    params={
-                        "limit": page_size,
-                        "start": start,
-                        "sort":  "date_desc",
-                    },
-                    timeout=20,
-                )
-            except Exception as exc:
-                log.debug(
-                    "Okendo reviews : erreur réseau",
-                    product_id=numeric_id,
-                    page=page,
-                    error=str(exc),
-                )
-                break
-
-            if response.status_code == 404:
-                # Produit sans avis ou ID incorrect — silencieux
-                log.debug(
-                    "Okendo reviews : 404 (produit sans avis ou GID invalide)",
-                    product_id=numeric_id,
-                )
-                break
-
-            if response.status_code != 200:
-                log.debug(
-                    "Okendo reviews : réponse non-200",
-                    product_id=numeric_id,
-                    status=response.status_code,
-                )
-                break
-
-            try:
-                data = response.json()
-            except Exception as exc:
-                log.debug(
-                    "Okendo reviews : JSON invalide",
-                    product_id=numeric_id,
-                    error=str(exc),
-                )
-                break
-
-            # Format de réponse Okendo :
-            # { "reviews": [...], "reviewAggregate": {...}, "hasMore": bool }
-            raw_reviews = data.get("reviews", [])
-            if not raw_reviews:
-                break
-
-            for r in raw_reviews:
-                reviews.append(_normalize_okendo_review(r))
-
-            # Pagination
-            has_more = data.get("hasMore", False)
-            if not has_more or len(reviews) >= limit:
-                break
-
-            start += page_size
-
+        response = client.get(url, params=params, timeout=20)
     except Exception as exc:
         log.warning(
-            "Okendo reviews : erreur inattendue",
-            product_id=numeric_id,
+            "Wacoal BV SEO : erreur réseau",
+            product_id=product_id,
             error=str(exc),
         )
+        return []
 
-    log.debug(
-        "Okendo reviews collectés",
-        product_id=numeric_id,
+    if response.status_code == 404:
+        log.debug("Wacoal BV SEO : produit sans avis ou ID invalide", product_id=product_id)
+        return []
+
+    if response.status_code != 200:
+        log.warning(
+            "Wacoal BV SEO : réponse non-200",
+            product_id=product_id,
+            status=response.status_code,
+        )
+        return []
+
+    raw = response.text
+    if not raw.strip():
+        return []
+
+    # ── Extraire le JSON depuis l'enveloppe JSONP ─────────────────────────
+    # Format : bvCallback({...}) ou var bvData = {...};
+    json_data = _extract_json_from_bv_response(raw, product_id)
+    if json_data is None:
+        return []
+
+    # ── Naviguer dans la structure BV SEO ─────────────────────────────────
+    # Plusieurs structures possibles selon la version BV
+    raw_reviews = (
+        json_data.get("reviews")
+        or json_data.get("Results")
+        or _deep_get(json_data, "jsonFeed", "reviews")
+        or _deep_get(json_data, "jsonFeed", "Results")
+        or []
+    )
+
+    if not isinstance(raw_reviews, list):
+        log.debug(
+            "Wacoal BV SEO : structure de réponse inattendue",
+            product_id=product_id,
+            keys=list(json_data.keys())[:10],
+        )
+        return []
+
+    for r in raw_reviews:
+        normalized = _normalize_bv_seo_review(r)
+        if normalized:
+            reviews.append(normalized)
+
+    log.info(
+        "Wacoal BV SEO reviews collectés",
+        product_id=product_id,
         total=len(reviews),
     )
     return reviews
 
 
-def _normalize_okendo_review(r: dict) -> dict:
-    """Normalise un avis Okendo vers le format interne du projet."""
-    # Extraire la variante depuis les attributs produit
-    variant_parts: list[str] = []
-    for attr in r.get("reviewer", {}).get("verifiedBuyer", {}).get("orderLineItems", []):
-        v = attr.get("variantTitle", "").strip()
-        if v:
-            variant_parts.append(v)
-            break
+def _extract_json_from_bv_response(raw: str, product_id: str) -> dict | None:
+    """
+    Extrait le JSON depuis différents formats de réponse BV SEO.
 
-    # Format alternatif : attributs dans reviewAttributes
-    if not variant_parts:
-        for attr in r.get("reviewAttributes", []):
-            if attr.get("attributeType") in ("size", "color", "variant"):
-                v = str(attr.get("value", "")).strip()
-                if v:
-                    variant_parts.append(v)
+    Formats possibles :
+      1. JSONP : bvCallback({...})
+      2. JS var : var bvData = {...};
+      3. JSON pur : {...}
+    """
+    # Format 1 : JSONP — bvCallback({...}) ou BVRRSourceID({...})
+    jsonp_match = re.search(r'[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(\s*(\{.*\})\s*\)\s*;?\s*$', raw, re.DOTALL)
+    if jsonp_match:
+        try:
+            return json.loads(jsonp_match.group(1))
+        except json.JSONDecodeError:
+            pass
 
-    reviewer = r.get("reviewer", {})
-    author   = (
-        reviewer.get("displayName")
-        or reviewer.get("name")
-        or reviewer.get("firstName", "")
+    # Format 2 : var bvData = {...};
+    var_match = re.search(r'var\s+\w+\s*=\s*(\{.*\})\s*;', raw, re.DOTALL)
+    if var_match:
+        try:
+            return json.loads(var_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Format 3 : JSON pur
+    stripped = raw.strip()
+    if stripped.startswith('{'):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+
+    # Format 4 : réponse HTML avec du JSON embarqué
+    json_embedded = re.search(r'\{["\']Results["\']:\s*\[', raw)
+    if json_embedded:
+        try:
+            start = json_embedded.start()
+            return json.loads(raw[start:])
+        except json.JSONDecodeError:
+            pass
+
+    log.debug(
+        "Wacoal BV SEO : impossible de parser la réponse",
+        product_id=product_id,
+        preview=raw[:200],
+    )
+    return None
+
+
+def _normalize_bv_seo_review(r: dict) -> dict | None:
+    """Normalise un avis depuis la réponse BV SEO vers le format interne."""
+    if not isinstance(r, dict):
+        return None
+
+    # Rating (peut être int ou float selon la version BV)
+    rating = r.get("rating") or r.get("Rating") or r.get("BVRRRating")
+    if rating is not None:
+        try:
+            rating = float(rating)
+        except (ValueError, TypeError):
+            rating = None
+
+    # Titre
+    title = (
+        r.get("title") or r.get("Title")
+        or r.get("BVRRReviewTitle") or ""
     ).strip()
 
+    # Corps
+    body = (
+        r.get("ReviewText") or r.get("reviewText")
+        or r.get("body") or r.get("Body")
+        or r.get("BVRRReviewText") or ""
+    ).strip()
+
+    # Date
     date_raw = (
-        r.get("dateCreated")
-        or r.get("createdAt")
-        or ""
+        r.get("SubmissionTime") or r.get("submissionTime")
+        or r.get("date") or r.get("Date") or ""
     )
-    # Tronquer à YYYY-MM-DD si ISO complet
-    date = date_raw[:10] if date_raw else ""
+    date = str(date_raw)[:10] if date_raw else ""
+
+    # Auteur
+    author = (
+        r.get("UserNickname") or r.get("userNickname")
+        or r.get("AuthorId") or r.get("author") or ""
+    ).strip()
+
+    # Variante (ContextDataValues chez BV)
+    variant = ""
+    cdv = r.get("ContextDataValues") or r.get("contextDataValues") or {}
+    if isinstance(cdv, dict):
+        size   = cdv.get("Size",  {}).get("Value", "")
+        color  = cdv.get("Color", {}).get("Value", "")
+        parts  = [p for p in [size, color] if p]
+        variant = " / ".join(parts)
+
+    # Ignorer les avis sans contenu
+    if not title and not body:
+        return None
 
     return {
-        "id":      str(r.get("reviewId", r.get("id", ""))),
-        "rating":  r.get("rating"),
-        "title":   (r.get("headline") or r.get("title") or "").strip(),
-        "body":    (r.get("body") or r.get("content") or "").strip(),
+        "id":      str(r.get("Id") or r.get("id") or ""),
+        "rating":  rating,
+        "title":   title,
+        "body":    body,
         "date":    date,
         "author":  author,
-        "variant": " / ".join(variant_parts),
+        "variant": variant,
     }
 
 
+def _deep_get(d: dict, *keys: str) -> Any:
+    """Accès sécurisé à un chemin de clés imbriquées."""
+    current = d
+    for k in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(k)
+    return current
+
+
 # ---------------------------------------------------------------------------
-# 3. Matières (inchangé)
+# 3. Identifiants BazaarVoice depuis le HTML (inchangé)
+# ---------------------------------------------------------------------------
+
+_BV_PRODUCT_ID_RE = re.compile(r'data-bv-product-id=["\'](\d+)["\']')
+_MNTN_HANDLE_RE   = re.compile(r'mntn_product_data\s*=\s*\{[^}]*"handle"\s*:\s*"([^"]+)"')
+
+
+def extract_bv_identifiers(html: str) -> tuple[str | None, str | None]:
+    """
+    Extrait le handle Shopify et l'ID numérique du produit depuis le HTML.
+
+    Le `data-bv-product-id` est l'ID numérique Shopify, utilisé comme
+    `product_id` pour l'endpoint SEO BazaarVoice.
+
+    Returns:
+        (handle, numeric_id)
+    """
+    if not html:
+        return None, None
+
+    handle: str | None = None
+    m_handle = _MNTN_HANDLE_RE.search(html)
+    if m_handle:
+        handle = m_handle.group(1).strip()
+
+    if not handle:
+        m_og = re.search(r'og:url"[^>]+content="[^"]+/products/([^"]+)"', html)
+        if m_og:
+            handle = m_og.group(1).strip().rstrip("/")
+
+    # Fallback handle depuis canonical
+    if not handle:
+        m_can = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href="[^"]+/products/([^"?]+)"', html)
+        if m_can:
+            handle = m_can.group(1).strip().rstrip("/")
+
+    numeric_id: str | None = None
+    m_id = _BV_PRODUCT_ID_RE.search(html)
+    if m_id:
+        numeric_id = m_id.group(1)
+
+    # Fallback numeric_id depuis JSON
+    if not numeric_id:
+        m_rid = re.search(r'"rid"\s*:\s*(\d+)', html)
+        if m_rid:
+            numeric_id = m_rid.group(1)
+
+    log.debug("Wacoal BV identifiants", handle=handle, numeric_id=numeric_id)
+    return handle, numeric_id
+
+
+# ---------------------------------------------------------------------------
+# 4. Matières (inchangé depuis v2.0)
 # ---------------------------------------------------------------------------
 
 def extract_materials_from_wacoal_html(html: str) -> dict:
@@ -394,15 +479,12 @@ def extract_materials_from_wacoal_html(html: str) -> dict:
 
     Les données sont dans un span avec classe `metafield-single_line_text_field`
     précédé d'un libellé "Fabric content".
-
-    Retourne {} si aucune composition n'est trouvée.
     """
     if not html:
         return {}
 
     raw_text: str | None = None
 
-    # Pattern 1 : "Fabric content:" suivi du metafield
     m = re.search(
         r'[Ff]abric content[^<]{0,50}'
         r'metafield-single_line_text_field["\s>]+([^<]{5,400})</span>',
@@ -412,7 +494,6 @@ def extract_materials_from_wacoal_html(html: str) -> dict:
     if m:
         raw_text = m.group(1).strip()
 
-    # Pattern 2 : n'importe quel metafield avec des %
     if not raw_text:
         candidates = re.findall(
             r'metafield-single_line_text_field["\s>]+([^<]{5,400})</span>',
@@ -430,12 +511,10 @@ def extract_materials_from_wacoal_html(html: str) -> dict:
         return {}
 
     result: dict = {"material_raw": raw_text[:500]}
-
     sections = [s.strip() for s in re.split(r";", raw_text) if s.strip()]
 
-    main_parts:   list[str] = []
+    main_parts: list[str]   = []
     lining_parts: list[str] = []
-
     for section in sections:
         low = section.lower()
         if any(kw in low for kw in _LINING_KEYWORDS):
@@ -473,22 +552,19 @@ def extract_materials_from_wacoal_html(html: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 4. Disponibilité par variante depuis le HTML (inchangé)
+# 5. Disponibilité par variante depuis le HTML (inchangé depuis v2.0)
 # ---------------------------------------------------------------------------
 
 def extract_variant_availability_from_html(html: str) -> dict[str, bool]:
     """
     Extrait un mapping {sku: available} depuis le JSON Shopify embarqué.
-
     Cherche dans `mntn_product_data` ou `Shop._PRODUCT_JSON_`.
-    Retourne {} si aucune donnée n'est trouvée.
     """
     if not html:
         return {}
 
     variants_data: list[dict] = []
 
-    # Source 1 : mntn_product_data (Mountain)
     m = re.search(r"mntn_product_data\s*=\s*(\{.*?\});\s*\n", html, re.DOTALL)
     if m:
         try:
@@ -497,7 +573,6 @@ def extract_variant_availability_from_html(html: str) -> dict[str, bool]:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Source 2 : Shop._PRODUCT_JSON_
     if not variants_data:
         m2 = re.search(r"Shop\._PRODUCT_JSON_\s*=\s*(\{.*?\});\s*\n", html, re.DOTALL)
         if m2:
@@ -529,12 +604,9 @@ def apply_html_availability_to_variants(
     variants: list[dict],
     sku_availability: dict[str, bool],
 ) -> list[dict]:
-    """
-    Applique le mapping {sku: available} aux variantes parsées depuis l'API JSON.
-    """
+    """Applique le mapping {sku: available} aux variantes parsées depuis l'API JSON."""
     if not sku_availability:
         return variants
-
     updated = []
     for v in variants:
         sku = v.get("sku", "")
@@ -543,53 +615,3 @@ def apply_html_availability_to_variants(
             v["available"] = sku_availability[sku]
         updated.append(v)
     return updated
-
-
-# ---------------------------------------------------------------------------
-# 5. Identifiants BazaarVoice (conservé pour compatibilité, non utilisé)
-# ---------------------------------------------------------------------------
-
-_BV_PRODUCT_ID_RE = re.compile(r'data-bv-product-id="(\d+)"')
-_MNTN_HANDLE_RE   = re.compile(r'mntn_product_data\s*=\s*\{[^}]*"handle"\s*:\s*"([^"]+)"')
-
-
-def extract_bv_identifiers(html: str) -> tuple[str | None, str | None]:
-    """
-    Extrait handle Shopify et ID numérique depuis le HTML.
-
-    Conservé pour compatibilité ascendante mais non utilisé pour les avis
-    depuis la v2.0 (BV REST API abandonnée).
-
-    Returns:
-        (handle, numeric_id)
-    """
-    if not html:
-        return None, None
-
-    handle: str | None = None
-    m_handle = _MNTN_HANDLE_RE.search(html)
-    if m_handle:
-        handle = m_handle.group(1).strip()
-
-    if not handle:
-        m_og = re.search(r'og:url"[^>]+content="[^"]+/products/([^"]+)"', html)
-        if m_og:
-            handle = m_og.group(1).strip().rstrip("/")
-
-    numeric_id: str | None = None
-    m_id = _BV_PRODUCT_ID_RE.search(html)
-    if m_id:
-        numeric_id = m_id.group(1)
-
-    # Fallback : extraire l'ID numérique depuis le handle ou le JSON embarqué
-    if not numeric_id:
-        m_rid = re.search(r'"rid"\s*:\s*(\d+)', html)
-        if m_rid:
-            numeric_id = m_rid.group(1)
-
-    log.debug(
-        "Wacoal identifiants extraits",
-        handle=handle,
-        numeric_id=numeric_id,
-    )
-    return handle, numeric_id

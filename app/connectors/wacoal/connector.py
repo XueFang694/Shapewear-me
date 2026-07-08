@@ -1,29 +1,25 @@
 """
-Connecteur Wacoal America v1.4 — passKey BazaarVoice extrait dynamiquement.
+Connecteur Wacoal America v2.0 — passage à l'endpoint SEO BazaarVoice.
 
-CORRECTIF v1.4
-───────────────
+CHANGEMENTS v2.0
+────────────────
+Suppression de toute dépendance à l'API REST BazaarVoice et au passKey.
 
-PROBLÈME (v1.3) :
-  Le passKey BazaarVoice codé en dur (`caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k`)
-  était invalide pour tous les produits → ERROR_PARAM_INVALID_API_KEY systématique
-  → count=0 et reviews=[] sur tous les produits.
+• fetch_bv_rating_with_fallback  → extract_rating_from_html()
+  Le rating est extrait directement depuis le HTML statique déjà fetchée
+  (bloc analytics Klaviyo / meta tags / JSON-LD). Zéro requête supplémentaire.
 
-CAUSE IDENTIFIÉE :
-  Le vrai passKey est la `storefront_api_key` injectée dans chaque page produit
-  par le pixel Shopify BazaarVoice (id 2305851608). Sa valeur est
-  `8aa6f9892dc1113e84be4fe1f3d29c49` (visible dans le bloc webPixelsConfigList).
-  Ce champ n'avait jamais été utilisé — l'ancienne clé provenait d'une source
-  incorrecte.
+• fetch_bv_reviews_with_fallback → fetch_bv_seo_reviews()
+  Les avis texte sont récupérés via l'endpoint SEO public de BazaarVoice
+  (seo.bazaarvoice.com/<seo_key>/product/<id>/reviews.djs).
+  Cet endpoint est public, sans passKey, conçu pour l'indexation SEO.
 
-SOLUTION :
-  1. `extract_bv_pass_key(html)` (html_utils.py) extrait la clé depuis le HTML
-     du fetch HTML déjà effectué (pas de requête supplémentaire).
-  2. La clé est transmise via le paramètre `pass_key` des fonctions BV.
-  3. La constante statique `_BV_PASS_KEY` dans html_utils.py est aussi corrigée
-     comme fallback en cas d'échec d'extraction.
+• extract_bv_pass_key            → supprimé (inutile)
+  Le passKey BV REST API est exclusivement dans bv.js (chargé en JS dynamique)
+  et n'est pas accessible sans exécuter le JS. Il est de toute façon invalide
+  pour l'API REST car c'est une clé d'initialisation widget navigateur.
 
-AUCUN AUTRE CHANGEMENT par rapport à v1.3.
+Toutes les autres fonctionnalités sont inchangées.
 """
 from __future__ import annotations
 
@@ -35,11 +31,10 @@ from app.connectors.base import BaseConnector, Category, ConnectorMeta, RawProdu
 from app.connectors.wacoal.html_utils import (
     apply_html_availability_to_variants,
     extract_bv_identifiers,
-    extract_bv_pass_key,
     extract_materials_from_wacoal_html,
+    extract_rating_from_html,
     extract_variant_availability_from_html,
-    fetch_bv_rating_with_fallback,
-    fetch_bv_reviews_with_fallback,
+    fetch_bv_seo_reviews,
 )
 from app.connectors.wacoal.mapping import (
     extract_best_seller_wacoal,
@@ -51,11 +46,10 @@ from app.scraping.shopify_connector_mixin import ShopifyConnectorMixin
 from app.scraping.shopify_utils import (
     clean_description,
     extract_colors,
+    extract_rating_and_reviews,
     extract_sizes,
     extract_variants_detailed,
-    normalize_availability,
     normalize_price,
-    extract_rating_and_reviews,
 )
 from app.core.exceptions import ConnectorParseError
 from app.core.logger import get_logger
@@ -79,7 +73,7 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
 
     def get_metadata(self) -> ConnectorMeta:
         return ConnectorMeta(
-            name="Wacoal America", slug="wacoal", version="1.4",
+            name="Wacoal America", slug="wacoal", version="2.0",
             engine="shopify_json", base_url=self.base_url,
         )
 
@@ -149,15 +143,8 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
 
         detailed_variants = extract_variants_detailed(variants, options)
 
-        # ── Fetch HTML unique (mutualisé pour tous les champs HTML) ───────
+        # ── Fetch HTML unique (mutualisé pour tous les champs) ────────────
         html_content = self._fetch_product_html(url)
-
-        # ── CORRECTIF v1.4 : extraire le passKey BV depuis le HTML ────────
-        bv_pass_key = extract_bv_pass_key(html_content) if html_content else None
-        if bv_pass_key:
-            log.debug("PassKey BV extrait du HTML", url=url, key_prefix=bv_pass_key[:8])
-        else:
-            log.debug("PassKey BV fallback statique utilisé", url=url)
 
         # ── 1. Matières ───────────────────────────────────────────────────
         materials = extract_materials_from_wacoal_html(html_content)
@@ -187,29 +174,33 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
                 "Wacoal disponibilité corrigée via HTML",
                 url=url,
                 availability=availability,
-                unavailable=sum(1 for v in detailed_variants if not v.get("available")),
-                total=len(detailed_variants),
             )
         else:
             availability = self._resolve_availability(variants, url)
 
-        # ── 3. Note et avis BazaarVoice ───────────────────────────────────
+        # ── 3. Rating depuis le HTML statique (sans requête supplémentaire)
         #
-        # CORRECTIF v1.4 : `pass_key=bv_pass_key` transmis à toutes les
-        # fonctions BV. Le passKey est maintenant extrait depuis le HTML de la
-        # page produit (storefront_api_key du pixel 2305851608), ce qui garantit
-        # l'utilisation de la clé valide pour chaque requête.
+        # v2.0 : extract_rating_from_html() lit la note directement depuis
+        # le HTML déjà fetchée. Sources consultées :
+        #   - Bloc analytics Klaviyo `okendo: { rating, count }` (si disponible)
+        #   - Balises <meta name="rating"> / <meta name="reviewCount">
+        #   - JSON-LD AggregateRating
+        # Zéro requête HTTP supplémentaire.
         #
-        # Avant v1.4 : _BV_PASS_KEY = "caElc2g6VBb1LfIMOqRFWr0S0QGKuoiiu61f4RAlnKH7k"
-        #              → ERROR_PARAM_INVALID_API_KEY → count=0 systématique
-        # Après v1.4  : pass_key = "8aa6f9892dc1113e84be4fe1f3d29c49" (depuis HTML)
-        #              → requêtes BV fonctionnelles
+        # Fallback : métafields Shopify (extract_rating_and_reviews)
+        rating, review_count = extract_rating_from_html(html_content)
 
-        rating, review_count = extract_rating_and_reviews(p.get("metafields"))
+        if rating is None or review_count is None:
+            mf_rating, mf_count = extract_rating_and_reviews(p.get("metafields"))
+            if rating is None:
+                rating = mf_rating
+            if review_count is None:
+                review_count = mf_count
 
+        # ── 4. Identifiants pour les avis ─────────────────────────────────
         bv_handle, bv_numeric_id = extract_bv_identifiers(html_content)
 
-        if not bv_handle and not bv_numeric_id:
+        if not bv_numeric_id:
             bv_numeric_id = str(p.get("id", "")) or None
 
         log.debug(
@@ -219,38 +210,25 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
             numeric_id=bv_numeric_id,
         )
 
-        if (rating is None or review_count is None) and (bv_handle or bv_numeric_id):
-            bv_rating, bv_count = fetch_bv_rating_with_fallback(
-                handle=bv_handle,
-                numeric_id=bv_numeric_id,
-                delay_min=self.delay_min,
-                delay_max=self.delay_max,
-                headers=self._config.get("headers", {}),
-                pass_key=bv_pass_key,  # CORRECTIF v1.4
-            )
-            if rating is None:
-                rating = bv_rating
-            if review_count is None:
-                review_count = bv_count
-
+        # ── 5. Avis texte — endpoint SEO BazaarVoice (sans passKey) ───────
+        #
+        # v2.0 : fetch_bv_seo_reviews() utilise l'endpoint public BV SEO :
+        #   https://seo.bazaarvoice.com/wacoal-1038-en_US/product/<id>/reviews.djs
+        # Aucun passKey requis. Dégradation gracieuse si inaccessible.
         reviews_data: list[dict] = []
-        if bv_handle or bv_numeric_id:
-            reviews_data = fetch_bv_reviews_with_fallback(
-                handle=bv_handle,
-                numeric_id=bv_numeric_id,
-                limit=100,
+        if bv_numeric_id:
+            reviews_data = fetch_bv_seo_reviews(
+                product_id=bv_numeric_id,
+                limit=self._config.get("max_reviews", 100),
                 delay_min=self.delay_min,
                 delay_max=self.delay_max,
                 headers=self._config.get("headers", {}),
-                pass_key=bv_pass_key,  # CORRECTIF v1.4
             )
             if reviews_data:
-                log.debug(
-                    "Wacoal avis BV récupérés",
+                log.info(
+                    "Wacoal avis BV SEO récupérés",
                     url=url,
                     count=len(reviews_data),
-                    rating=rating,
-                    via_handle=bool(bv_handle),
                 )
 
         return RawProduct(
@@ -288,12 +266,12 @@ class WacoalConnector(ShopifyConnectorMixin, BaseConnector):
             },
         )
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    # ── Helper ────────────────────────────────────────────────────────────
 
     def _fetch_product_html(self, json_url: str) -> str:
         """
         Fetche la page HTML d'un produit Wacoal depuis son URL JSON.
-        Ce fetch est mutualisé : matières, disponibilité, passKey BV et avis
+        Ce fetch est mutualisé : matières, disponibilité, rating et avis
         sont tous extraits depuis ce HTML unique (un seul appel HTTP).
         Retourne "" en cas d'échec (non bloquant).
         """
